@@ -1,0 +1,180 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: evaluation
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evaluation-runtime
+  namespace: evaluation
+data:
+  LANGFUSE_BASE_URL: http://192.168.65.254:3000
+  EVAL_MODEL_RESOLVER_URL: http://evaluation-api.evaluation.svc.cluster.local:8001
+  EVAL_PLATFORM: langfuse
+  EVAL_LLM_PROXY_ENABLED: 'true'
+  EVAL_CONCURRENCY: '1'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: evaluation-api
+  namespace: evaluation
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: evaluation-worker
+  namespace: evaluation
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evaluation-api
+  namespace: evaluation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: evaluation-api
+  template:
+    metadata:
+      labels:
+        app: evaluation-api
+    spec:
+      serviceAccountName: evaluation-api
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: api
+        image: docker.io/ianwoolf/evaluation-worker:k8s-20261020-r3
+        imagePullPolicy: IfNotPresent
+        command:
+        - python
+        - -m
+        - uvicorn
+        - evaluation_backend.api:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8001'
+        ports:
+        - containerPort: 8001
+        env:
+        - name: EVAL_MODEL_REGISTRY
+          value: /config/models.json
+        - name: EVAL_MODEL_RESOLVER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: evaluation-models
+              key: resolver-token
+        - name: EVAL_TRIGGER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: evaluation-trigger
+              key: token
+        - name: EVAL_WORKER_IMAGE
+          value: docker.io/ianwoolf/evaluation-worker:k8s-20261020-r3
+        - name: EVAL_PUBLIC_LANGFUSE_URL
+          value: http://localhost:3000
+        - name: EVAL_RESOURCE_BINDINGS
+          value: '[{"target_id": "guardrail-privacy", "dataset_id": "ds-guardrail",
+            "dataset_version": 1, "environment_id": "env-isolated", "model_id": "glm-dev",
+            "langfuse_dataset_id": "cmvff7e84000dpq4o7rg21lhd", "langfuse_dataset_version":
+            "2026-10-20T06:00:00Z"}]'
+        volumeMounts:
+        - name: models
+          mountPath: /config
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 10
+      volumes:
+      - name: models
+        secret:
+          secretName: evaluation-models
+          items:
+          - key: models.json
+            path: models.json
+          defaultMode: 288
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: evaluation-api
+  namespace: evaluation
+spec:
+  selector:
+    app: evaluation-api
+  ports:
+  - port: 8001
+    targetPort: 8001
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: evaluation-jobs
+  namespace: evaluation
+rules:
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: evaluation-jobs
+  namespace: evaluation
+subjects:
+- kind: ServiceAccount
+  name: evaluation-api
+  namespace: evaluation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: evaluation-jobs

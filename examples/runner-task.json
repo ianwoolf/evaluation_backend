@@ -1,0 +1,9 @@
+{
+  "id": "runner-example-001",
+  "image": "busybox:1.36",
+  "command": ["/bin/sh", "-c", "echo workload-started; echo \"$EVALUATION_MANIFEST\"; sleep 2; echo workload-finished"],
+  "manifest": {"evaluationId": "smoke-001", "mode": "runtime-smoke"},
+  "cpu": 0.5,
+  "memory_mb": 64,
+  "timeout_seconds": 30
+}
