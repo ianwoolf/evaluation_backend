@@ -1,7 +1,8 @@
-"""One experiment identity on all runner-owned OTEL spans, including SDK internals."""
+"""Experiment identities and storage-backed LLM observation export."""
 import os
+import time
 import uuid
-from evaluation_backend.config import LangfuseConfig
+from datetime import datetime, timezone
 
 
 def prepare_experiment(env, fresh=False):
@@ -13,24 +14,41 @@ def prepare_experiment(env, fresh=False):
     return ident
 
 
-def create_telemetry(config=None):
-    from langfuse import Langfuse
-    from opentelemetry.sdk.trace import TracerProvider, SpanProcessor
-    from opentelemetry.sdk.resources import Resource
-    ident = os.environ.get('EXPERIMENT_ID') or os.environ.get('EVALUATE_ID')
-    if not ident:
-        raise ValueError('EXPERIMENT_ID is required for runner telemetry')
-    class ExperimentLabels(SpanProcessor):
-        def on_start(self, span, parent_context=None):
-            span.set_attribute('experiment_id', ident)
-            span.set_attribute('langfuse.observation.metadata.experiment_id', ident)
-            span.set_attribute('langfuse.trace.metadata.experiment_id', ident)
-            span.set_attribute('langfuse.trace.tags', ['experiment_id:' + ident])
-        def on_end(self, span): pass
-        def shutdown(self): pass
-        def force_flush(self, timeout_millis=30000): return True
-    provider = TracerProvider(resource=Resource.create({'service.name': 'evaluation-runner', 'experiment_id': ident}))
-    provider.add_span_processor(ExperimentLabels())
-    config = config or LangfuseConfig.from_env()
-    return Langfuse(public_key=config.public_key, secret_key=config.secret_key,
-                    base_url=config.base_url, tracer_provider=provider)
+class StorageObservation:
+    def __init__(self, client, evaluation_id, values):
+        self.client, self.evaluation_id, self.values = client, evaluation_id, values
+        self.id = 'llm-' + uuid.uuid4().hex
+        self.started = time.perf_counter()
+        self.created_at = datetime.now(timezone.utc).isoformat()
+        self.ended = False
+
+    def update(self, **values):
+        self.values.update({k: v.isoformat() if isinstance(v, datetime) else v for k, v in values.items()})
+
+    def end(self):
+        if self.ended:
+            return
+        self.client.trace({'id': self.id, 'evaluation_id': self.evaluation_id,
+            'created_at': self.created_at, 'name': self.values.get('name', 'runner.llm'),
+            'data': {**self.values, 'duration_ms': (time.perf_counter() - self.started) * 1000}})
+        self.ended = True
+
+
+class StorageTelemetry:
+    def __init__(self, env=None):
+        from evaluation_backend.storage.client import StorageClient
+        env = os.environ if env is None else env
+        self.client = StorageClient(env)
+        self.ident = env.get('EXPERIMENT_ID') or env.get('EVALUATE_ID')
+        if not self.ident:
+            raise ValueError('EXPERIMENT_ID is required for telemetry')
+
+    def start_observation(self, **values):
+        return StorageObservation(self.client, self.ident, values)
+
+    def flush(self):
+        pass  # Each finished observation is persisted synchronously.
+
+
+def create_telemetry(env=None):
+    return StorageTelemetry(env)

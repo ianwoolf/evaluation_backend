@@ -1,0 +1,76 @@
+"""Platform-independent target/scorer execution with per-sample durable feedback."""
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+
+from evaluation_backend.experiment import Dataset, Score
+from .client import StorageClient
+
+
+class StoredExperiment:
+    def __init__(self, client=None, version=None):
+        self.client = client or StorageClient()
+        self.version = int(version or os.environ.get('EVAL_DATASET_VERSION', '1'))
+        self.content = None
+
+    def get_dataset(self, settings):
+        self.content = self.client.version(settings.dataset_id, self.version)
+        if not self.content['rows']:
+            raise ValueError('Dataset has no published records')
+        return Dataset(settings.dataset_id, self.content['name'], self.content['metadata'])
+
+    def execute(self, settings, dataset, target, scorers):
+        content = self.content
+        summary = {'dataset_id': dataset.id, 'dataset_version': self.version, 'items': 0, 'errors': 0, 'status': 'RUNNING'}
+        self.client.experiment(settings.evaluation_id, summary)
+
+        def sample(entry):
+            index, row = entry
+            fields = content['fields']
+            def select(role):
+                return {f['name']: row[f['name']] for f in fields if f['role'] == role and f['name'] in row}
+            value, reference, metadata = select('input'), select('reference'), select('metadata')
+            result = {'id': f'sample-{index:08d}', 'input': value, 'reference': reference, 'output': {},
+                      'status': 'ERROR', 'error': None, 'scores': [], 'trace': [], 'costUsd': 0}
+            started = time.perf_counter()
+            try:
+                before = time.perf_counter()
+                result['output'] = target(value)
+                if not isinstance(result['output'], dict):
+                    raise ValueError('Target must return an object')
+                result['trace'].append({'name': 'Target', 'kind': 'GUARDRAIL',
+                    'durationMs': (time.perf_counter() - before) * 1000, 'detail': 'Target completed'})
+                for scorer in scorers:
+                    before = time.perf_counter()
+                    score = scorer.evaluate(input=value, output=result['output'], reference=reference, metadata=metadata)
+                    if not isinstance(score, Score):
+                        raise ValueError('Scorer must return Score')
+                    result['scores'].append({'scorerId': scorer.id, 'scorerVersion': scorer.version,
+                        'value': score.value, 'passed': score.value >= scorer.threshold, 'reason': score.reason})
+                    result['trace'].append({'name': scorer.id, 'kind': 'SCORER',
+                        'durationMs': (time.perf_counter() - before) * 1000, 'detail': score.reason})
+                result['status'] = 'PASS' if all(s['passed'] for s in result['scores']) else 'FAIL'
+            except Exception as error:
+                # Do not persist exception strings which may contain auth headers.
+                result['error'] = type(error).__name__
+                if not isinstance(result['output'], dict):
+                    result['output'] = {}
+            result['latencyMs'] = (time.perf_counter() - started) * 1000
+            # Persistence errors propagate and fail the Job instead of losing results silently.
+            self.client.sample(settings.evaluation_id, result)
+            return result['status']
+
+        try:
+            with ThreadPoolExecutor(max_workers=settings.concurrency) as pool:
+                for status in pool.map(sample, enumerate(content['rows'])):
+                    summary['items'] += 1
+                    summary['errors'] += status == 'ERROR'
+            summary['status'] = 'FAILED' if summary['errors'] else 'COMPLETED'
+        except Exception:
+            summary['status'] = 'FAILED'
+            summary['errors'] += 1
+            self.client.experiment(settings.evaluation_id, summary)
+            raise
+        self.client.experiment(settings.evaluation_id, summary)
+        return {**summary, 'evaluation_id': settings.evaluation_id}

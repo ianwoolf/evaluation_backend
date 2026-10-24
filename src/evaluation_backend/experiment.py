@@ -15,7 +15,7 @@ class Settings:
     evaluation_id: str
     scorer_ids: list[str]
     dataset_version: datetime
-    platform: str = 'langfuse'
+    platform: str = 'storage'
     concurrency: int = 1
 
     @classmethod
@@ -40,7 +40,7 @@ class Settings:
         concurrency = int(env.get('EVAL_CONCURRENCY', '1'))
         if not 1 <= concurrency <= 32:
             raise ValueError('EVAL_CONCURRENCY must be 1..32')
-        return cls(required('DATASET_ID'), evaluation_id.strip(), ids, version.astimezone(timezone.utc), env.get('EVAL_PLATFORM', 'langfuse'), concurrency)
+        return cls(required('DATASET_ID'), evaluation_id.strip(), ids, version.astimezone(timezone.utc), env.get('EVAL_PLATFORM', 'storage'), concurrency)
 
 
 @dataclass(frozen=True)

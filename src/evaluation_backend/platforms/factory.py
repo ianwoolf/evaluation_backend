@@ -1,5 +1,5 @@
 def create_platform(name):
-    if name == "langfuse":
-        from evaluation_backend.platforms.langfuse import LangfusePlatform
-        return LangfusePlatform()
+    if name == "storage":
+        from evaluation_backend.storage.experiment import StoredExperiment
+        return StoredExperiment()
     raise ValueError("platform adapter not implemented: " + name)

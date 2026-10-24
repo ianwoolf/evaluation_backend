@@ -1,0 +1,77 @@
+# Local development only: cluster-internal HTTP, no host port, no authentication.
+apiVersion: v1
+kind: Service
+metadata:
+  name: evaluation-es
+  namespace: evaluation
+spec:
+  selector:
+    app: evaluation-es
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: evaluation-es
+  namespace: evaluation
+spec:
+  serviceName: evaluation-es
+  replicas: 1
+  selector:
+    matchLabels:
+      app: evaluation-es
+  template:
+    metadata:
+      labels:
+        app: evaluation-es
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: elasticsearch
+          image: docker.io/library/elasticsearch:8.19.23
+          ports:
+            - containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            - name: xpack.security.enabled
+              value: 'false'
+            - name: node.store.allow_mmap
+              value: 'false'
+            - name: ES_JAVA_OPTS
+              value: '-Xms512m -Xmx512m'
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: '2'
+              memory: 2Gi
+          startupProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?wait_for_status=yellow&timeout=1s
+              port: 9200
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi

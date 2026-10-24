@@ -1,0 +1,22 @@
+# Collector Contrib configuration template, not a Kubernetes resource.
+# Deploy a compatible Collector image separately before selecting OTLP export.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+processors:
+  batch: {}
+exporters:
+  elasticsearch:
+    endpoints: [http://evaluation-es.evaluation.svc.cluster.local:9200]
+    mapping:
+      mode: otel
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [elasticsearch]

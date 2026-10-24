@@ -12,6 +12,15 @@ def create_app() -> FastAPI:
     app.include_router(router)
     from evaluation_backend.runs import router as runs_router
     app.include_router(runs_router)
+    from evaluation_backend.storage.api import router as storage_router
+    from evaluation_backend.storage import StorageError, NotFound, Conflict
+    from fastapi.responses import JSONResponse
+    app.include_router(storage_router)
+
+    @app.exception_handler(StorageError)
+    async def storage_error(request, error):
+        status = 404 if isinstance(error, NotFound) else 409 if isinstance(error, Conflict) else 503
+        return JSONResponse(status_code=status, content={'detail': str(error)})
 
     @app.get("/health", tags=["health"])
     def health() -> dict[str, str]:

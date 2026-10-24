@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from evaluation_backend.config import LangfuseConfig, load_config
+from evaluation_backend.config import load_config
 
 
 def merge(chunks):
@@ -62,10 +62,8 @@ def create_proxy(env=None, client=None, telemetry=None):
     if any(not env.get(k) for k in required):
         raise ValueError('runner model, resolver URL/token and local proxy token are required')
     if telemetry is None:
-        from langfuse import Langfuse
-        config = LangfuseConfig.from_env()
         from evaluation_backend.telemetry import create_telemetry
-        telemetry = create_telemetry(config)
+        telemetry = create_telemetry(env)
     owned = client is None
     client = client or httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15), follow_redirects=False, trust_env=False,
                                            verify=proxy_ssl_context(env))

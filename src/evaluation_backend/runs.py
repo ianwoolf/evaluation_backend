@@ -6,13 +6,14 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
 from evaluation_backend.k8s_job import build_job
+from evaluation_backend.storage.service import get_service
+from evaluation_backend.storage import NotFound
 
 router = APIRouter(prefix='/api/v1/evaluations')
 PREFIX = 'evaluation.tasklattice.io/'
@@ -87,7 +88,7 @@ def owned(job, project):
     return job
 
 
-def summary(job, cluster):
+def summary(job, cluster, service=None, project=None):
     meta = job['metadata']
     annotation = meta.get('annotations', {})
     record = json.loads(annotation[PREFIX + 'record'])
@@ -112,32 +113,52 @@ def summary(job, cluster):
                     pass
         if status == 'FAILED':
             error = 'Worker failed. Check the evaluation Job logs for details.'
-    report_url = result.get('url')
-    if report_url and os.getenv('EVAL_PUBLIC_LANGFUSE_URL'):
-        parsed = urlparse(report_url)
-        report_url = os.environ['EVAL_PUBLIC_LANGFUSE_URL'].rstrip('/') + parsed.path + ('?' + parsed.query if parsed.query else '')
+    completed = result.get('items', 0)
+    if service is not None:
+        experiment_id = meta['labels']['experiment_id']
+        page = service.page('samples', project, filters={'evaluation_id': experiment_id}, limit=1)
+        completed = page['total']
+        try:
+            stored = service.storage.get('experiments', project, experiment_id)
+            if stored['status'] == 'FAILED':
+                status = 'FAILED'
+        except NotFound:
+            pass
     return {**record, 'id': meta['name'], 'created_at': meta.get('creationTimestamp'), 'status': status,
-            'experiment_id': meta['labels']['experiment_id'], 'completed': result.get('items', 0),
-            'report_url': report_url, 'error': error, 'phase': 'RUNNING' if job.get('status', {}).get('active') else 'QUEUED',
-            'langfuse_experiment_id': result.get('langfuse_experiment_id')}
+            'experiment_id': meta['labels']['experiment_id'], 'completed': completed,
+            'error': error, 'phase': status if status != 'RUNNING' else 'RUNNING' if job.get('status', {}).get('active') else 'QUEUED'}
 
 
 @router.get('/config', dependencies=[Depends(authorize)])
 def configuration():
-    return {'runtime': 'kubernetes', 'bindings': bindings(), 'scoring_modes': ['mock'],
-            'target_mode': 'llm', 'scorer_ids': ['mock-score']}
+    return {'runtime': 'kubernetes', 'bindings': bindings(), 'scoring_modes': ['mock', 'installed'],
+            'target_mode': 'llm', 'scorer_ids': ['mock-score', 'sc-risk']}
 
 
 @router.post('/runs', dependencies=[Depends(authorize)])
 def start(request: StartRun, x_project_id: str = Header(min_length=1),
-          idempotency_key: str = Header(min_length=16, max_length=128), cluster=Depends(kube)):
+          idempotency_key: str = Header(min_length=16, max_length=128), cluster=Depends(kube), service=Depends(get_service)):
     binding = next((b for b in bindings() if b['target_id'] == request.target_id
                     and b['dataset_id'] == request.dataset_id and b['dataset_version'] == request.dataset_version
                     and b['environment_id'] == request.environment_id and b['model_id'] == request.model_id), None)
     if not binding:
         raise HTTPException(422, 'Selected target, dataset version, environment or model has no backend binding')
-    if request.scoring_mode != 'mock' or request.scorer_ids != ['mock-score']:
-        raise HTTPException(422, 'Only explicitly selected mock-score is currently installed')
+    version = service.dataset_version(x_project_id, request.dataset_id, request.dataset_version)
+    if request.scoring_mode == 'mock':
+        if request.scorer_ids != ['mock-score']:
+            raise HTTPException(422, 'Mock mode requires only mock-score')
+    else:
+        from evaluation_backend.experiment import Dataset
+        from evaluation_backend.scorers import InstalledScorerLibrary
+        try:
+            if not request.scorer_ids or len(request.scorer_ids) != len(set(request.scorer_ids)):
+                raise ValueError('Scorers must be nonempty and unique')
+            allowed = version.get('scorerIds', [])
+            if allowed and any(s not in allowed for s in request.scorer_ids):
+                raise ValueError('Scorer is not enabled for this dataset version')
+            InstalledScorerLibrary().get_scorers(Dataset(request.dataset_id, version['name'], version['metadata']), request.scorer_ids)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
     if len(json.dumps(request.snapshot).encode()) > 32000:
         raise HTTPException(422, 'Configuration snapshot is too large')
     record = request.model_dump()
@@ -151,15 +172,17 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     else:
         if previous['metadata']['annotations'][PREFIX + 'request-hash'] != digest:
             raise HTTPException(409, 'Idempotency key was used for different configuration')
-        return summary(previous, cluster)
-    job = build_job(binding['langfuse_dataset_id'], request.model_id, request.scorer_ids,
-                    namespace=cluster.namespace, image=os.environ['EVAL_WORKER_IMAGE'], mock=True)
+        return summary(previous, cluster, service, x_project_id)
+    job = build_job(request.dataset_id, request.model_id, request.scorer_ids,
+                    namespace=cluster.namespace, image=os.environ['EVAL_WORKER_IMAGE'], mock=request.scoring_mode == 'mock')
     job['metadata']['name'] = name
     job['metadata']['labels']['project'] = project_label(x_project_id)
     job['metadata']['annotations'] = {PREFIX + 'project': x_project_id, PREFIX + 'record': json.dumps(record), PREFIX + 'request-hash': digest}
-    # UI versions map to immutable Langfuse "as of" timestamps in server config.
-    version = binding.get('langfuse_dataset_version') or datetime.now(timezone.utc).isoformat()
-    job['spec']['template']['spec']['containers'][0]['env'].append({'name': 'DATASET_VERSION', 'value': version})
+    # Pin the exact immutable storage version; never resolve a vendor dataset ID.
+    job['spec']['template']['spec']['containers'][0]['env'].extend([
+        {'name': 'EVAL_DATASET_VERSION', 'value': str(request.dataset_version)},
+        {'name': 'EVAL_PLATFORM', 'value': 'storage'},
+        {'name': 'EVAL_PROJECT_ID', 'value': x_project_id}])
     # Retain runs for history; explicit cleanup can be configured by operators.
     job['spec'].pop('ttlSecondsAfterFinished', None)
     try:
@@ -170,17 +193,17 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         created = owned(cluster.call('GET', cluster.jobs + '/' + name), x_project_id)
         if created['metadata']['annotations'][PREFIX + 'request-hash'] != digest:
             raise HTTPException(409, 'Idempotency conflict')
-    return summary(created, cluster)
+    return summary(created, cluster, service, x_project_id)
 
 
 @router.get('/runs', dependencies=[Depends(authorize)])
-def list_runs(x_project_id: str = Header(min_length=1), cluster=Depends(kube)):
+def list_runs(x_project_id: str = Header(min_length=1), cluster=Depends(kube), service=Depends(get_service)):
     jobs = cluster.call('GET', cluster.jobs, params={'labelSelector': 'app=evaluation-worker,project=' + project_label(x_project_id)})
-    return {'items': [summary(owned(j, x_project_id), cluster) for j in jobs.get('items', [])]}
+    return {'items': [summary(owned(j, x_project_id), cluster, service, x_project_id) for j in jobs.get('items', [])]}
 
 
 @router.get('/runs/{name}', dependencies=[Depends(authorize)])
-def get_run(name: str, x_project_id: str = Header(min_length=1), cluster=Depends(kube)):
+def get_run(name: str, x_project_id: str = Header(min_length=1), cluster=Depends(kube), service=Depends(get_service)):
     if not name.startswith('eval-') or not all(c.isalnum() or c == '-' for c in name):
         raise HTTPException(404, 'Evaluation not found')
-    return summary(owned(cluster.call('GET', cluster.jobs + '/' + name), x_project_id), cluster)
+    return summary(owned(cluster.call('GET', cluster.jobs + '/' + name), x_project_id), cluster, service, x_project_id)
