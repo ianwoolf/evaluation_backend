@@ -15,6 +15,9 @@ def test_otlp_json_exports_trace_with_runner_identity(monkeypatch):
     monkeypatch.setenv('EVAL_TRIGGER_TOKEN', 'test-token')
     monkeypatch.setenv('EVAL_PROJECT_ID', 'project')
     monkeypatch.setenv('EXPERIMENT_ID', 'exp-1')
+    monkeypatch.setenv('EVAL_COLLECTOR_LOCAL', 'true')
+    monkeypatch.setenv('EVAL_CONTENT_POLICY', '{"input":"omit"}')
+    monkeypatch.setenv('EVAL_TARGET_SNAPSHOT', '{"id":"g","name":"Guardrail","provider":"nemo guardrail","version":2}')
     saved = []
     class Store:
         def put(self, *args):
@@ -28,3 +31,4 @@ def test_otlp_json_exports_trace_with_runner_identity(monkeypatch):
         assert client.post('/v1/traces', json=payload).status_code == 401
         assert client.post('/v1/traces', json=payload, headers={'Authorization': 'Bearer test-token'}).status_code == 200
     assert saved[0][:3] == ('traces', 'project', 'exp-1:a:b')
+    assert saved[0][3]['target']['provider']=='nemo guardrail'

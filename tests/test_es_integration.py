@@ -25,6 +25,15 @@ def test_collector_and_report_with_real_es(monkeypatch):
     with TestClient(collector) as sink, TestClient(api) as backend:
         summary = {'status': 'RUNNING', 'dataset_id': 'integration', 'dataset_version': 1, 'items': 0, 'errors': 0}
         base = '/api/v1/evaluations/'
+        env_path = base + 'environments/' + evaluation
+        config = {'name':'Integration','modelId':'glm-dev','guardrailId':'g','cpuMillicores':750,'memoryMiB':768}
+        saved = backend.post(env_path,json={'config':config},headers=headers)
+        assert saved.status_code == 200, saved.text
+        updated = backend.patch(env_path,json={'revision':saved.json()['revision'],'cpuMillicores':500},headers=headers)
+        assert updated.status_code == 200, updated.text
+        assert backend.get(env_path,headers=headers).json()['versions'][-1]['cpuMillicores'] == 500
+        assert backend.get(env_path+'/versions/1',headers=headers).json()['cpuMillicores'] == 750
+        assert backend.patch(env_path,json={'revision':saved.json()['revision'],'cpuMillicores':600},headers=headers).status_code == 409
         assert sink.post(base + 'experiments/' + evaluation, json=summary, headers=headers).status_code == 200
         sample = {'id': 'sample-1', 'input': {'messages': []}, 'reference': {'has_issue': False},
                   'output': {'has_issue': False}, 'status': 'PASS', 'latencyMs': 1, 'scores': [

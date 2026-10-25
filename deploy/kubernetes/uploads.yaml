@@ -1,0 +1,12 @@
+# API-owned temporary data; mount only in evaluation-api, never in workers.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: evaluation-uploads
+  namespace: evaluation
+spec:
+  storageClassName: standard
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi

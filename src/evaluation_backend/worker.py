@@ -58,6 +58,14 @@ def main():
         from evaluation_backend.telemetry import prepare_experiment
         prepare_experiment(os.environ)
         settings = Settings.from_env()
+        from evaluation_backend.targets import env_target
+        target_info = env_target()
+        if target_info:
+            print(json.dumps({'event': 'evaluation.target', 'evaluation_id': settings.evaluation_id, 'target': target_info}), flush=True)
+            from evaluation_backend.storage.client import StorageClient
+            from evaluation_backend.storage.service import now
+            StorageClient().trace({'id': 'target-' + settings.evaluation_id, 'evaluation_id': settings.evaluation_id,
+                'created_at': now(), 'name': 'evaluation.target', 'data': {}})
         from evaluation_backend.platforms.factory import create_platform
         platform = create_platform(settings.platform)
         from evaluation_backend.llm_target import LlmClassificationTarget, MockScorerLibrary

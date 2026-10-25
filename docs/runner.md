@@ -47,3 +47,19 @@ Docker 无原生 Job deadline，必须运行 wait 或由 coordinator 定期 stat
 此接口仅供受信任的 coordinator/CLI 调用，没有新增无鉴权的任意镜像执行 HTTP API。SQLite 只管理本地控制进程生命周期，尚未实现多主机调度、队列、事件 ingestion、重试 attempt、Secret/PVC 或 OpenShell 专用镜像协议。LOST 明确表示外部资源被移除，不能当作成功。logs 在 cleanup 后不可获取，生产需先归档。
 
 依据：[Docker create](https://docs.docker.com/reference/cli/docker/container/create/)；[Kubernetes Jobs](https://kubernetes.io/docs/concepts/workloads/controllers/job/)。依赖本机 docker / kubectl，不增加 Python 容器 SDK。
+
+
+## Evaluation worker resources
+
+Legacy run requests accept `resources: {"cpu_millicores": 2000, "memory_mib": 2048}`
+and `environment_version` (default 1). UI sends the selected environment version
+and its resource values. CPU accepts integer 1–32000 m; memory accepts integer
+128–65536 Mi. `1000m = 1 CPU core`; `1024Mi = 1Gi`. Both container requests and
+limits use these values. API runs now resolve resources from the saved environment version; a supplied
+legacy resource object must match it. Direct Job rendering defaults to
+2000m / 2048Mi. The run
+snapshot records the validated values and idempotency includes resources.
+
+Environment edits are persisted through the environment API in ES. See
+[environments-targets.md](environments-targets.md). Other sandbox settings are unchanged. CPU/memory field names
+in new UI snapshots are `cpuMillicores` and `memoryMiB` to avoid unit ambiguity.

@@ -130,7 +130,7 @@ def test_openshell_injects_ids_without_secret_argv(tmp_path, mode):
     policy.write_text('policy')
     config = {**env(), 'EVAL_RUNNER_MODE': mode, 'EVAL_OPENSHELL_' + mode.upper() + '_GATEWAY': 'test-gateway',
               'EVAL_WORKER_IMAGE': 'worker@sha256:test', 'EVAL_OPENSHELL_POLICY': str(policy),
-              'LANGFUSE_SECRET_KEY': 'private-key'}
+              'EVAL_STORAGE_TOKEN': 'private-key'}
     calls = []
     def call(args, **kwargs):
         calls.append(args)
@@ -142,7 +142,7 @@ def test_openshell_injects_ids_without_secret_argv(tmp_path, mode):
             from pathlib import Path
             uploaded = Path(args[args.index('upload') + 2])
             values = json.loads(uploaded.read_text())
-            assert values['LANGFUSE_SECRET_KEY'] == 'private-key'
+            assert values['EVAL_STORAGE_TOKEN'] == 'private-key'
             assert values['DATASET_ID'] == 'dataset-id'
             assert values['SCORER_IDS'] == '["sc-risk"]'
             assert values['EXPERIMENT_ID'].startswith('exp-')
@@ -167,13 +167,7 @@ def test_openshell_failure_stops_but_preserves(tmp_path):
     assert not any('delete' in args for args in calls)
 
 
-def test_installed_sdk_contract():
-    pytest.importorskip('langfuse')
-    from langfuse._client.datasets import DatasetClient
-    from langfuse import Langfuse
-    from langfuse.experiment import ExperimentResult
-    assert 'dataset_run_url' in inspect.signature(ExperimentResult).parameters
-    assert 'experiment_id' in inspect.signature(ExperimentResult).parameters
-    assert 'version' in inspect.signature(Langfuse.get_dataset).parameters
-    params = inspect.signature(DatasetClient.run_experiment).parameters
-    assert all(x in params for x in ['name', 'task', 'evaluators', 'max_concurrency', 'metadata'])
+def test_legacy_platform_is_not_silently_used():
+    from evaluation_backend.platforms.factory import create_platform
+    with pytest.raises(ValueError, match='not implemented'):
+        create_platform('langfuse')

@@ -9,11 +9,13 @@ metadata:
   name: evaluation-runtime
   namespace: evaluation
 data:
-  LANGFUSE_BASE_URL: http://192.168.65.254:3000
   EVAL_MODEL_RESOLVER_URL: http://evaluation-api.evaluation.svc.cluster.local:8001
-  EVAL_PLATFORM: langfuse
+  EVAL_ES_URL: http://evaluation-es:9200
+  EVAL_COLLECTOR_EXPORTER: elasticsearch
+  EVAL_PLATFORM: storage
   EVAL_LLM_PROXY_ENABLED: 'true'
   EVAL_CONCURRENCY: '1'
+  EVAL_STORAGE_API_URL: http://evaluation-api.evaluation.svc.cluster.local:8001
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -55,8 +57,8 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: docker.io/ianwoolf/evaluation-worker:k8s-20261020-r3
-        imagePullPolicy: IfNotPresent
+        image: evaluation-worker:local-config-v1
+        imagePullPolicy: Never
         command:
         - python
         - -m
@@ -82,20 +84,26 @@ spec:
               name: evaluation-trigger
               key: token
         - name: EVAL_WORKER_IMAGE
-          value: docker.io/ianwoolf/evaluation-worker:k8s-20261020-r3
-        - name: EVAL_PUBLIC_LANGFUSE_URL
-          value: http://localhost:3000
+          value: evaluation-worker:local-config-v1
         - name: EVAL_RESOURCE_BINDINGS
           value: '[{"target_id": "guardrail-privacy", "dataset_id": "ds-guardrail",
-            "dataset_version": 1, "environment_id": "env-isolated", "model_id": "glm-dev",
-            "langfuse_dataset_id": "cmvff7e84000dpq4o7rg21lhd", "langfuse_dataset_version":
-            "2026-10-20T06:00:00Z"}]'
+            "dataset_version": 1, "environment_id": "env-isolated", "model_id": "glm-dev"}]'
+        - name: EVAL_STORAGE_BACKEND
+          value: elasticsearch
+        - name: EVAL_ES_URL
+          value: http://evaluation-es:9200
+        - name: EVAL_UPLOAD_DIR
+          value: /uploads
+        - name: EVAL_CONTENT_POLICY
+          value: '{"input":"retain","response":"retain","reference":"retain"}'
         volumeMounts:
         - name: models
           mountPath: /config
           readOnly: true
         - name: tmp
           mountPath: /tmp
+        - name: uploads
+          mountPath: /uploads
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -129,6 +137,11 @@ spec:
           defaultMode: 288
       - name: tmp
         emptyDir: {}
+      - name: uploads
+        persistentVolumeClaim:
+          claimName: evaluation-uploads
+  strategy:
+    type: Recreate
 ---
 apiVersion: v1
 kind: Service

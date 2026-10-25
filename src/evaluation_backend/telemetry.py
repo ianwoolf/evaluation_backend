@@ -28,9 +28,11 @@ class StorageObservation:
     def end(self):
         if self.ended:
             return
+        from evaluation_backend.content_policy import ContentPolicy
+        policy = ContentPolicy.from_env()
         self.client.trace({'id': self.id, 'evaluation_id': self.evaluation_id,
-            'created_at': self.created_at, 'name': self.values.get('name', 'runner.llm'),
-            'data': {**self.values, 'duration_ms': (time.perf_counter() - self.started) * 1000}})
+            'created_at': self.created_at, 'name': 'Execution trace' if policy.restricted else self.values.get('name', 'runner.llm'),
+            'data': policy.observation({**self.values, 'duration_ms': (time.perf_counter() - self.started) * 1000})})
         self.ended = True
 
 

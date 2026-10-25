@@ -15,7 +15,8 @@ class StoredExperiment:
         self.content = None
 
     def get_dataset(self, settings):
-        self.content = self.client.version(settings.dataset_id, self.version)
+        run_input = os.getenv('EVAL_RUN_INPUT_ID')
+        self.content = self.client.run_input(run_input) if run_input else self.client.version(settings.dataset_id, self.version)
         if not self.content['rows']:
             raise ValueError('Dataset has no published records')
         return Dataset(settings.dataset_id, self.content['name'], self.content['metadata'])

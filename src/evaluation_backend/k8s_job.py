@@ -5,9 +5,20 @@ import yaml
 import re
 import subprocess
 import uuid
+from pydantic import BaseModel, ConfigDict, Field
 
 
-def build_job(dataset_id, model_id, scorer_ids, *, namespace='evaluation', image='evaluation-worker:experiment', mock=False, experiment_id=None):
+class PodResources(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    cpu_millicores: int = Field(default=2000, ge=1, le=32000, strict=True)
+    memory_mib: int = Field(default=2048, ge=128, le=65536, strict=True)
+
+    def kubernetes(self):
+        values = {"cpu": f"{self.cpu_millicores}m", "memory": f"{self.memory_mib}Mi"}
+        return {"requests": dict(values), "limits": dict(values)}
+
+
+def build_job(dataset_id, model_id, scorer_ids, *, namespace='evaluation', image='evaluation-worker:experiment', mock=False, experiment_id=None, resources: PodResources | None = None):
     if not dataset_id or not model_id or not scorer_ids:
         raise ValueError('dataset, model and scorer IDs are required')
     if not re.fullmatch(r'[a-z0-9]([-a-z0-9]*[a-z0-9])?', namespace) or len(namespace) > 63:
@@ -32,7 +43,7 @@ def build_job(dataset_id, model_id, scorer_ids, *, namespace='evaluation', image
                              'command': ['python', '-m', 'evaluation_backend.proxy_entrypoint', '--', 'python', '-m', 'evaluation_backend.worker'],
                              'envFrom': [{'configMapRef': {'name': 'evaluation-runtime'}}, {'secretRef': {'name': 'evaluation-runner'}}],
                              'env': [{'name': k, 'value': v} for k, v in values.items()],
-                             'resources': {'requests': {'cpu': '250m', 'memory': '256Mi'}, 'limits': {'cpu': '2', 'memory': '1Gi'}},
+                             'resources': (resources or PodResources()).kubernetes(),
                              'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True, 'capabilities': {'drop': ['ALL']}},
                              'volumeMounts': [{'name': 'tmp', 'mountPath': '/tmp'}, {'name': 'home', 'mountPath': '/home/worker'}]}],
                          'volumes': [{'name': 'tmp', 'emptyDir': {'sizeLimit': '128Mi'}}, {'name': 'home', 'emptyDir': {'sizeLimit': '128Mi'}}]}}}}

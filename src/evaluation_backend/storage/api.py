@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 
 from evaluation_backend.runs import authorize
+from evaluation_backend.content_policy import policy_for
+from evaluation_backend.targets import trace_target
 from .service import DatasetDocument, get_service, now, public
 
 router = APIRouter(prefix='/api/v1/evaluations', dependencies=[Depends(authorize)])
@@ -85,7 +87,11 @@ def save_dataset(ident: str, value: DatasetDocument, x_project_id: str = Header(
 def save_trace(value: TraceDocument, x_project_id: str = Header(min_length=1), service=Depends(get_service)):
     if len(value.model_dump_json().encode()) > 1_000_000:
         raise HTTPException(413, 'Trace exceeds 1 MB')
-    return public(service.storage.put('traces', x_project_id, value.id, value.model_dump()))
+    policy = policy_for(service, x_project_id, value.evaluation_id)
+    record = {**value.model_dump(), **trace_target(service, x_project_id, value.evaluation_id)}
+    record['data'] = policy.trace_data(record['data'])
+    if policy.restricted: record['name'] = 'Execution trace'
+    return public(service.storage.put('traces', x_project_id, value.id, record))
 
 
 @router.get('/traces')
@@ -106,14 +112,16 @@ def save_sample(ident: str, value: SampleDocument, x_project_id: str = Header(mi
         raise HTTPException(413, 'Sample exceeds 2 MB')
     # Deterministic IDs make a retry after an interrupted HTTP response safe.
     stamp = now()
-    sample = {**value.model_dump(), 'evaluation_id': ident, 'sample_id': value.id, 'created_at': stamp}
-    for score in value.scores:
+    filtered = policy_for(service, x_project_id, ident).sample(value.model_dump())
+    sample = {**filtered, 'evaluation_id': ident, 'sample_id': value.id, 'created_at': stamp}
+    for score in filtered['scores']:
         score_id = json.dumps([ident, value.id, score['scorerId']])
         service.storage.put('scores', x_project_id, score_id, {**score, 'id': score_id,
             'evaluation_id': ident, 'sample_id': value.id, 'scorer_id': score['scorerId'], 'created_at': stamp})
     trace_id = json.dumps([ident, value.id])
     service.storage.put('traces', x_project_id, trace_id, {'id': trace_id, 'evaluation_id': ident,
-        'sample_id': value.id, 'created_at': stamp, 'name': 'evaluation.sample', 'data': sample})
+        'sample_id': value.id, 'created_at': stamp, 'name': 'evaluation.sample', 'data': sample,
+        **trace_target(service, x_project_id, ident)})
     # The sample is the commit marker, written after its trace and scores.
     return public(service.storage.put('samples', x_project_id, trace_id, sample))
 

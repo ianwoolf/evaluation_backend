@@ -31,11 +31,20 @@ class StorageClient:
     def version(self, ident, version):
         return self.call('GET', f'datasets/{quote(ident, safe="")}/versions/{version}')
 
+    def run_input(self, ident):
+        return self.call('GET', 'run-input/' + quote(ident, safe=''))
+
     def sample(self, ident, value):
+        from evaluation_backend.content_policy import ContentPolicy
+        value = ContentPolicy.from_env().sample(value)
         return self.call('POST', f'experiments/{quote(ident, safe="")}/samples', value)
 
     def experiment(self, ident, value):
         return self.call('POST', f'experiments/{quote(ident, safe="")}', value)
 
     def trace(self, value):
+        from evaluation_backend.content_policy import ContentPolicy
+        policy = ContentPolicy.from_env()
+        value = {**value, 'data': policy.trace_data(value['data'])}
+        if policy.restricted: value['name'] = 'Execution trace'
         return self.call('POST', 'traces', value)

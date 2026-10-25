@@ -9,7 +9,7 @@ import httpx
 
 from . import Conflict, NotFound, StorageError
 
-COLLECTIONS = {'datasets', 'traces', 'scores', 'experiments', 'samples'}
+COLLECTIONS = {'datasets', 'traces', 'scores', 'experiments', 'samples', 'run-contexts', 'environments', 'target-configs'}
 
 
 class ElasticsearchStorage:

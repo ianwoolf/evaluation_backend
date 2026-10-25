@@ -7,6 +7,8 @@ import os
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from evaluation_backend.runs import authorize
+from evaluation_backend.content_policy import ContentPolicy
+from evaluation_backend.targets import trace_target
 from evaluation_backend.storage import StorageError, NotFound, Conflict
 from evaluation_backend.storage.api import router
 from evaluation_backend.storage.service import get_service, now
@@ -18,6 +20,7 @@ def create_collector():
         raise NotImplementedError('LangSmith collector exporter is not implemented')
     if backend != 'elasticsearch':
         raise ValueError('Unknown collector exporter')
+    policy = ContentPolicy.from_env()
     app = FastAPI(title='Runner collector')
     app.include_router(router)
 
@@ -25,6 +28,11 @@ def create_collector():
     async def project_boundary(request, call_next):
         if request.url.path.startswith('/api/') and request.headers.get('x-project-id') != os.environ.get('EVAL_PROJECT_ID'):
             return JSONResponse(status_code=403, content={'detail': 'Collector project mismatch'})
+        if os.getenv('EVAL_COLLECTOR_LOCAL') == 'true' and request.url.path != '/health':
+            exp = os.environ['EXPERIMENT_ID']
+            allowed = {'/v1/traces', '/api/v1/evaluations/traces', '/api/v1/evaluations/experiments/' + exp, '/api/v1/evaluations/experiments/' + exp + '/samples'}
+            if request.method != 'POST' or request.url.path not in allowed:
+                return JSONResponse(status_code=403, content={'detail': 'Collector operation denied'})
         return await call_next(request)
 
     @app.exception_handler(StorageError)
@@ -51,8 +59,8 @@ def create_collector():
                         raise HTTPException(422, 'traceId and spanId are required')
                     ident = f'{evaluation}:{trace_id}:{span_id}'
                     service.storage.put('traces', project, ident, {'id': ident,
-                        'evaluation_id': evaluation, 'created_at': now(), 'name': span.get('name', 'span'),
-                        'data': {'span': span, 'resource': resource.get('resource', {}), 'scope': scope.get('scope', {})}})
+                        'evaluation_id': evaluation, **trace_target(service, project, evaluation), 'created_at': now(), 'name': 'Execution trace' if policy.restricted else span.get('name', 'span'),
+                        'data': policy.trace_data({'span': span, 'resource': resource.get('resource', {}), 'scope': scope.get('scope', {})})})
         return {}
 
     return app

@@ -22,6 +22,7 @@ def main():
     collector_port = int(os.getenv('EVAL_COLLECTOR_PORT', '18091'))
     os.environ['EVAL_COLLECTOR_URL'] = f'http://127.0.0.1:{collector_port}'
     collector_env = dict(os.environ)
+    collector_env['EVAL_COLLECTOR_LOCAL'] = 'true'
     collector_env['EVAL_TRIGGER_TOKEN'] = os.environ.get('EVAL_STORAGE_TOKEN', '')
     collector = subprocess.Popen([sys.executable, '-m', 'evaluation_backend.collector'], env=collector_env)
     proxy_env = {k: v for k, v in os.environ.items() if not k.startswith('EVAL_ES_')}

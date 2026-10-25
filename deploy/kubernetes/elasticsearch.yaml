@@ -35,7 +35,8 @@ spec:
         fsGroup: 1000
       containers:
         - name: elasticsearch
-          image: docker.io/library/elasticsearch:8.19.23
+          image: elasticsearch:8.18.1
+          imagePullPolicy: Never
           ports:
             - containerPort: 9200
           env:
@@ -65,13 +66,13 @@ spec:
               path: /_cluster/health?wait_for_status=yellow&timeout=1s
               port: 9200
           volumeMounts:
-            - name: data
+            - name: es-data
               mountPath: /usr/share/elasticsearch/data
   volumeClaimTemplates:
     - metadata:
-        name: data
+        name: es-data
       spec:
         accessModes: [ReadWriteOnce]
         resources:
           requests:
-            storage: 10Gi
+            storage: 5Gi
