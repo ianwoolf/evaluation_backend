@@ -144,6 +144,11 @@ def test_run_uses_database_environment_and_trusted_target(setup):
     assert job['spec']['template']['spec']['containers'][0]['resources']['limits']=={'cpu':'750m','memory':'768Mi'}
     env={v['name']:v['value'] for v in job['spec']['template']['spec']['containers'][0]['env']}
     target=json.loads(env['EVAL_TARGET_SNAPSHOT'])
+    environment=json.loads(env['EVAL_ENVIRONMENT_SNAPSHOT'])
+    assert environment['id']=='e' and environment['version']==1
+    assert environment['guardrailId']=='g' and env['EVAL_GUARDRAIL_ID']=='g'
+    assert environment['modelId']=='glm-dev'
+    assert environment['cpuMillicores']==750 and environment['memoryMiB']==768
     assert target['provider']=='nemo guardrail' and target['name']=='Guardrail'
     assert run['snapshot']['target']['provider']=='nemo guardrail'
 

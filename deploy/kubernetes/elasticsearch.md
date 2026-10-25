@@ -16,7 +16,7 @@ single-user deployment. Shared deployments require authentication and TLS.
 Loopback access: `kubectl -n evaluation port-forward service/evaluation-es
 9200:9200 --address 127.0.0.1` (write this command on one line).
 
-Import `elasticsearch:8.18.1` into node containerd before applying the manifest
-with Never image pull policy. Keep the ES version compatible with existing
+The manifest uses `ianwoolf/evaluation-elasticsearch:8.18.1` with IfNotPresent.
+Online nodes pull it from Docker Hub; offline nodes must import it into containerd first. Keep the ES version compatible with existing
 storage. App image imports do not restore a lost PVC; back up ES snapshots before
 rebuilding the cluster. See README.md for complete ordering and dependencies.

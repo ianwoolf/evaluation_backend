@@ -35,8 +35,8 @@ spec:
         fsGroup: 1000
       containers:
         - name: elasticsearch
-          image: elasticsearch:8.18.1
-          imagePullPolicy: Never
+          image: ianwoolf/evaluation-elasticsearch:8.18.1
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9200
           env:

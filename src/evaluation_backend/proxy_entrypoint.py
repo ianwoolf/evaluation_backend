@@ -26,25 +26,29 @@ def main():
     collector_env['EVAL_TRIGGER_TOKEN'] = os.environ.get('EVAL_STORAGE_TOKEN', '')
     collector = subprocess.Popen([sys.executable, '-m', 'evaluation_backend.collector'], env=collector_env)
     proxy_env = {k: v for k, v in os.environ.items() if not k.startswith('EVAL_ES_')}
-    proxy = subprocess.Popen([sys.executable, '-m', 'evaluation_backend.llm_proxy'], env=proxy_env)
+    proxy = None if os.getenv('EVAL_MODEL_ID') == 'none' else subprocess.Popen([sys.executable, '-m', 'evaluation_backend.llm_proxy'], env=proxy_env)
     child = None
     def stop(signum, frame):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, stop)
     try:
         for _ in range(120):
-            if proxy.poll() is not None or collector.poll() is not None:
+            if (proxy is not None and proxy.poll() is not None) or collector.poll() is not None:
                 raise RuntimeError('Runner service failed to start')
             try:
-                with urlopen(f'http://127.0.0.1:{port}/health', timeout=1):
-                    with urlopen(f'http://127.0.0.1:{collector_port}/health', timeout=1):
-                        break
+                if proxy is not None:
+                    with urlopen(f'http://127.0.0.1:{port}/health', timeout=1):
+                        pass
+                with urlopen(f'http://127.0.0.1:{collector_port}/health', timeout=1):
+                    break
             except Exception:
                 time.sleep(.5)
         else:
             raise RuntimeError('LLM proxy startup timeout')
         env = dict(os.environ)
-        env.update(OPENAI_BASE_URL=f'http://127.0.0.1:{port}/v1', OPENAI_API_BASE=f'http://127.0.0.1:{port}/v1', OPENAI_API_KEY=env['EVAL_LLM_PROXY_TOKEN'])
+        env['EVAL_LLM_PROXY_ENABLED'] = 'false'
+        if proxy is not None:
+            env.update(OPENAI_BASE_URL=f'http://127.0.0.1:{port}/v1', OPENAI_API_BASE=f'http://127.0.0.1:{port}/v1', OPENAI_API_KEY=env['EVAL_LLM_PROXY_TOKEN'])
         # Workload needs only the local proxy credential, not resolver/provider credentials.
         env.pop('EVAL_MODEL_RESOLVER_TOKEN', None)
         for key in list(env):
@@ -52,7 +56,7 @@ def main():
                 env.pop(key)
         child = subprocess.Popen(command, env=env)
         while child.poll() is None:
-            if proxy.poll() is not None or collector.poll() is not None:
+            if (proxy is not None and proxy.poll() is not None) or collector.poll() is not None:
                 raise RuntimeError('Runner service exited during workload')
             time.sleep(.2)
         return child.returncode

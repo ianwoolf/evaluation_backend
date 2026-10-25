@@ -1,0 +1,27 @@
+{
+  "fields": [
+    {
+      "name": "messages",
+      "type": "json",
+      "role": "input",
+      "required": true,
+      "description": "Conversation messages: [{role: system|user|assistant, content: string}]"
+    },
+    {
+      "name": "has_issue",
+      "type": "boolean",
+      "role": "reference",
+      "required": true,
+      "description": "Ground truth: true = risky conversation, false = safe conversation. Not sent to the target."
+    },
+    {
+      "name": "category",
+      "type": "string",
+      "role": "metadata",
+      "required": false,
+      "description": "Risk category used for analysis"
+    }
+  ],
+  "version": 1,
+  "name": "Guardrail conversation safety"
+}

@@ -31,6 +31,7 @@ class SampleDocument(BaseModel):
     status: Literal['PASS', 'FAIL', 'ERROR']
     error: str | None = None
     latencyMs: float = Field(ge=0, allow_inf_nan=False)
+    modelLatencyMs: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     costUsd: float = Field(default=0, ge=0, allow_inf_nan=False)
     scores: list[dict[str, Any]] = Field(max_length=100)
     trace: list[dict[str, Any]] = Field(max_length=200)

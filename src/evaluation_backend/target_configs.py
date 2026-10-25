@@ -28,7 +28,10 @@ def selection(project, ident, value, service):
     binding=next((b for b in bindings() if b['target_id']==ident and b['dataset_id']==value.dataset_id and b['dataset_version']==value.dataset_version and b['environment_id']==value.environment_id),None)
     if not binding: raise HTTPException(422,'Selected target, dataset or environment has no backend binding')
     dataset=service.dataset_version(project,value.dataset_id,value.dataset_version)
-    environment_version(service,project,value.environment_id,value.environment_version)
+    environment = environment_version(service,project,value.environment_id,value.environment_version)
+    if environment['modelId'] not in ('none', binding['model_id']):
+        raise HTTPException(422, 'Environment model has no backend binding')
+    binding = {**binding, 'model_id': environment['modelId']}
     if value.scoring_mode=='mock':
         if value.scorer_ids!=['mock-score']:raise HTTPException(422,'Mock mode requires only mock-score')
     else:

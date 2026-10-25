@@ -1,4 +1,5 @@
 """Platform-independent target/scorer execution with per-sample durable feedback."""
+from copy import deepcopy
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -33,15 +34,21 @@ class StoredExperiment:
                 return {f['name']: row[f['name']] for f in fields if f['role'] == role and f['name'] in row}
             value, reference, metadata = select('input'), select('reference'), select('metadata')
             result = {'id': f'sample-{index:08d}', 'input': value, 'reference': reference, 'output': {},
-                      'status': 'ERROR', 'error': None, 'scores': [], 'trace': [], 'costUsd': 0}
+                      'status': 'ERROR', 'error': None, 'scores': [], 'trace': [], 'costUsd': 0, 'modelLatencyMs': 0}
             started = time.perf_counter()
             try:
-                before = time.perf_counter()
-                result['output'] = target(value)
-                if not isinstance(result['output'], dict):
-                    raise ValueError('Target must return an object')
-                result['trace'].append({'name': 'Target', 'kind': 'GUARDRAIL',
-                    'durationMs': (time.perf_counter() - before) * 1000, 'detail': 'Target completed'})
+                if os.getenv('EVAL_MODEL_ID') == 'none':
+                    result['output'] = deepcopy(value)
+                else:
+                    before = time.perf_counter()
+                    try:
+                        result['output'] = target(value)
+                    finally:
+                        result['modelLatencyMs'] = (time.perf_counter() - before) * 1000
+                    if not isinstance(result['output'], dict):
+                        raise ValueError('Target must return an object')
+                    result['trace'].append({'name': 'Target', 'kind': 'GUARDRAIL',
+                        'durationMs': result['modelLatencyMs'], 'detail': 'Target completed'})
                 for scorer in scorers:
                     before = time.perf_counter()
                     score = scorer.evaluate(input=value, output=result['output'], reference=reference, metadata=metadata)

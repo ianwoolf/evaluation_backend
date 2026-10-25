@@ -41,3 +41,34 @@ def test_stale_trigger_and_invalid_config_do_not_launch(setup):
     config['dataset_id']='missing'
     assert c.post(path,json=config,headers=h).status_code==422
     assert k.created==0
+
+
+def test_none_config_uses_pinned_environment_model_and_rejects_override(setup):
+    c,k,b,h=setup
+    env=c.get('/api/v1/evaluations/environments/e',headers=h).json()
+    config={'name':'No model','modelId':'none','guardrailId':'g','cpuMillicores':750,'memoryMiB':768}
+    saved=c.post('/api/v1/evaluations/environments/e',json={'revision':env['revision'],'config':config},headers=h)
+    assert saved.status_code==200,saved.text
+    selection={'dataset_id':'d','dataset_version':1,'environment_id':'e','environment_version':2,'scorer_ids':['mock-score']}
+    saved=c.post('/api/v1/evaluations/targets/g/config',json=selection,headers=h)
+    assert saved.status_code==200,saved.text
+    assert saved.json()['model_id']=='none'
+    # An explicit request cannot override the model in the pinned environment.
+    wrong={**b,'environment_version':2,'model_id':'glm-dev'}
+    assert c.post('/api/v1/evaluations/runs',json=wrong,headers=h).status_code==422
+    run=c.post('/api/v1/evaluations/targets/g/runs',json={'config_revision':saved.json()['revision']},headers=h)
+    assert run.status_code==200,run.text
+    assert run.json()['model_id']=='none'
+    assert run.json()['snapshot']['environment']['modelId']=='none'
+
+
+def test_sample_trace_retains_zero_model_latency_without_model_step(setup):
+    c,k,b,h=setup
+    sample={'id':'sample-no-model','input':{'messages':[]},'output':{'messages':[]},
+            'reference':{},'status':'PASS','latencyMs':10,'modelLatencyMs':0,
+            'scores':[],'trace':[{'kind':'SCORER','name':'test','durationMs':10}]}
+    assert c.post('/api/v1/evaluations/experiments/no-model/samples',json=sample,headers=h).status_code==200
+    traces=c.get('/api/v1/evaluations/traces?evaluation_id=no-model',headers=h).json()['items']
+    assert len(traces)==1
+    assert traces[0]['data']['modelLatencyMs']==0
+    assert [step['kind'] for step in traces[0]['data']['trace']]==['SCORER']

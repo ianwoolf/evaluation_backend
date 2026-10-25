@@ -57,8 +57,8 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: evaluation-worker:local-config-v1
-        imagePullPolicy: Never
+        image: ianwoolf/evaluation-worker:20261025-env-v1
+        imagePullPolicy: IfNotPresent
         command:
         - python
         - -m
@@ -84,7 +84,7 @@ spec:
               name: evaluation-trigger
               key: token
         - name: EVAL_WORKER_IMAGE
-          value: evaluation-worker:local-config-v1
+          value: ianwoolf/evaluation-worker:20261025-env-v1
         - name: EVAL_RESOURCE_BINDINGS
           value: '[{"target_id": "guardrail-privacy", "dataset_id": "ds-guardrail",
             "dataset_version": 1, "environment_id": "env-isolated", "model_id": "glm-dev"}]'

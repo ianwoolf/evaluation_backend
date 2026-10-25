@@ -58,6 +58,14 @@ def main():
         from evaluation_backend.telemetry import prepare_experiment
         prepare_experiment(os.environ)
         settings = Settings.from_env()
+        environment_snapshot = os.getenv('EVAL_ENVIRONMENT_SNAPSHOT')
+        if environment_snapshot:
+            environment_info = json.loads(environment_snapshot)
+            if not isinstance(environment_info, dict):
+                raise ValueError('Environment snapshot must be an object')
+            # Log only the selected Environment config, never process env or credentials.
+            print(json.dumps({'event': 'evaluation.environment', 'evaluation_id': settings.evaluation_id,
+                'environment': environment_info}, ensure_ascii=False), flush=True)
         from evaluation_backend.targets import env_target
         target_info = env_target()
         if target_info:
@@ -73,7 +81,9 @@ def main():
         scorer_mode = os.getenv('EVAL_SCORER_MODE', 'installed')
         if target_mode not in {'guardrail', 'llm'} or scorer_mode not in {'installed', 'mock'}:
             raise ValueError('unknown target/scorer mode')
-        target = LlmClassificationTarget() if target_mode == 'llm' else HttpGuardrail(os.environ['EVAL_TARGET_URL'], os.getenv('EVAL_MODEL_ID'), os.getenv('EVAL_TARGET_TOKEN'))
+        target = None
+        if os.getenv('EVAL_MODEL_ID') != 'none':
+            target = LlmClassificationTarget() if target_mode == 'llm' else HttpGuardrail(os.environ['EVAL_TARGET_URL'], os.getenv('EVAL_MODEL_ID'), os.getenv('EVAL_TARGET_TOKEN'))
         library = MockScorerLibrary() if scorer_mode == 'mock' else InstalledScorerLibrary()
         result = run_experiment(settings, platform, library, platform, target)
         result['experiment_id'] = settings.evaluation_id

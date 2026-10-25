@@ -5,7 +5,7 @@ metadata:
   name: evaluation-uploads
   namespace: evaluation
 spec:
-  storageClassName: standard
+  # Uses the cluster default StorageClass; set explicitly if your cluster has none.
   accessModes: [ReadWriteOnce]
   resources:
     requests:

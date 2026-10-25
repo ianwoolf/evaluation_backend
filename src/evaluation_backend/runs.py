@@ -156,7 +156,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
           idempotency_key: str = Header(min_length=16, max_length=128), cluster=Depends(kube), service=Depends(get_service)):
     binding = next((b for b in bindings() if b['target_id'] == request.target_id
                     and b['dataset_id'] == request.dataset_id and b['dataset_version'] == request.dataset_version
-                    and b['environment_id'] == request.environment_id and b['model_id'] == request.model_id), None)
+                    and b['environment_id'] == request.environment_id and request.model_id in ('none', b['model_id'])), None)
     if not binding:
         raise HTTPException(422, 'Selected target, dataset version, environment or model has no backend binding')
     # Idempotency is checked before touching temporary content (which may already be deleted).
@@ -174,6 +174,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     from evaluation_backend.environments import environment_version
     from evaluation_backend.targets import targets
     environment = environment_version(service, x_project_id, request.environment_id, request.environment_version)
+    if request.model_id != environment['modelId']:
+        raise HTTPException(422, 'Model must match the stored environment version')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
     if request.resources is not None and request.resources != resources:
         raise HTTPException(422, 'Resources must match the stored environment version')
@@ -203,6 +205,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         if context['request_hash'] != digest: raise HTTPException(409, 'Idempotency conflict')
     target = context.get('target', target)
     environment = context.get('environment', environment)
+    if request.model_id != environment['modelId']:
+        raise HTTPException(422, 'Model must match the stored environment version')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
     # Do not put caller-supplied rows or arbitrary snapshot data in Kubernetes annotations.
     snapshot = {'target': target, 'datasetId': request.dataset_id,
@@ -227,6 +231,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         {'name': 'EVAL_RUN_INPUT_ID', 'value': experiment},
         {'name': 'EVAL_STORAGE_TOKEN', 'value': issue_worker_token(x_project_id, experiment)},
         {'name': 'EVAL_TARGET_SNAPSHOT', 'value': json.dumps(target)},
+        {'name': 'EVAL_GUARDRAIL_ID', 'value': environment['guardrailId']},
+        {'name': 'EVAL_ENVIRONMENT_SNAPSHOT', 'value': json.dumps({**environment, 'id': request.environment_id})},
         {'name': 'EVAL_CONTENT_POLICY', 'value': json.dumps(context['content_policy'])}])
     # Retain runs for history; explicit cleanup can be configured by operators.
     job['spec'].pop('ttlSecondsAfterFinished', None)

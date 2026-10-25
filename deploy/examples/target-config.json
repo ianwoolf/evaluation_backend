@@ -1,0 +1,9 @@
+{
+  "dataset_id": "ds-guardrail",
+  "dataset_version": 1,
+  "environment_id": "env-isolated",
+  "environment_version": 1,
+  "data_source": "published",
+  "scoring_mode": "mock",
+  "scorer_ids": ["mock-score"]
+}

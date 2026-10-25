@@ -1,0 +1,19 @@
+{
+  "config": {
+    "name": "Isolated evaluation",
+    "description": "Kubernetes evaluation environment",
+    "type": "SANDBOX",
+    "modelId": "none",
+    "guardrailId": "guardrail-privacy",
+    "runner": {"id": "kubernetes", "concurrency": 1},
+    "cpuMillicores": 500,
+    "memoryMiB": 1024,
+    "timeoutSeconds": 120,
+    "network": [],
+    "readOnlyPaths": [],
+    "writablePaths": ["/tmp"],
+    "commands": ["python"],
+    "interceptLlm": true,
+    "interceptGuardrail": true
+  }
+}
