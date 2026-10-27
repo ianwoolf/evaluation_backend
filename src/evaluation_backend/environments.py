@@ -1,4 +1,5 @@
 """Project-scoped, immutable environment versions stored in the evaluation database."""
+from evaluation_backend.observability import observed
 from typing import Literal
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -53,6 +54,7 @@ def environment_version(service, project, ident, version):
     raise NotFound('Environment version not found')
 
 
+@observed('environment.save', project_id='project', environment_id='ident')
 def save_environment(service, project, ident, value):
     import re
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', ident):

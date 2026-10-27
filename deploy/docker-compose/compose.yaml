@@ -1,0 +1,99 @@
+name: evaluation-backend
+services:
+  evaluation-es:
+    image: ${EVAL_ES_IMAGE:-docker.io/library/elasticsearch:8.19.23}
+    # Normalize file permissions inside Linux; Windows bind-mounted secrets may be 0777.
+    entrypoint:
+      - /bin/tini
+      - --
+      - /bin/bash
+      - -ec
+      - 'umask 077; cat /run/secrets/es_password > /tmp/es-bootstrap-password; export ELASTIC_PASSWORD_FILE=/tmp/es-bootstrap-password; exec /usr/local/bin/docker-entrypoint.sh eswrapper'
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'true'
+      xpack.security.http.ssl.enabled: 'false'
+      node.store.allow_mmap: 'false'
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    secrets: [es_password]
+    ports: ['127.0.0.1:${EVAL_ES_PORT:-9200}:9200']
+    volumes: [es-data:/usr/share/elasticsearch/data]
+    mem_limit: 2g
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS --max-time 3 --user "elastic:$$(cat /run/secrets/es_password)" http://localhost:9200/_cluster/health >/dev/null']
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    restart: unless-stopped
+    networks: [evaluation]
+
+  init-uploads:
+    image: ${EVAL_WORKER_IMAGE:-evaluation-worker:deploy-v2}
+    user: '0:0'
+    entrypoint: [python, -c, 'import os; os.chown("/uploads",10001,10001); os.chmod("/uploads",0o700)']
+    volumes: [uploads:/uploads]
+    network_mode: none
+    restart: 'no'
+
+  evaluation-api:
+    image: ${EVAL_WORKER_IMAGE:-evaluation-worker:deploy-v2}
+    build:
+      context: ../..
+      dockerfile: Dockerfile.worker
+    entrypoint: [python, -m, uvicorn, 'evaluation_backend.api:app', --host, 0.0.0.0, --port, '8001', --no-access-log]
+    environment:
+      EVAL_CONFIG_FILE: /config/backend.env
+      EVAL_DOCKER_NETWORK: ${EVAL_NETWORK:-evaluation-compose}
+      EVAL_WORKER_IMAGE: ${EVAL_WORKER_IMAGE:-evaluation-worker:deploy-v2}
+      EVAL_TRIGGER_TOKEN_FILE: /run/secrets/trigger_token
+      EVAL_MODEL_RESOLVER_TOKEN_FILE: /run/secrets/resolver_token
+      EVAL_MODEL_TOKENS_FILE: /run/secrets/model_tokens
+      EVAL_ES_PASSWORD_FILE: /run/secrets/es_password
+      EVAL_ES_API_KEY_FILE: /run/secrets/es_api_key
+      OTEL_EXPORTER_OTLP_LOGS_HEADERS_FILE: /run/secrets/otel_headers
+    configs:
+      - source: backend_settings
+        target: /config/backend.env
+      - source: models
+        target: /config/models.json
+      - source: bindings
+        target: /config/bindings.json
+    secrets: [trigger_token, resolver_token, model_tokens, es_password, es_api_key, otel_headers]
+    group_add: ['${DOCKER_GID:-0}']
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - uploads:/uploads
+    read_only: true
+    tmpfs: ['/tmp:uid=10001,gid=10001']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    ports: ['127.0.0.1:${EVAL_API_PORT:-8001}:8001']
+    depends_on:
+      evaluation-es: {condition: service_healthy}
+      init-uploads: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://localhost:8001/health", timeout=3)']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+    networks: [evaluation]
+
+configs:
+  backend_settings: {file: ./config/backend.env}
+  models: {file: ./config/models.json}
+  bindings: {file: ./config/bindings.json}
+secrets:
+  trigger_token: {file: ./.secrets/trigger_token}
+  resolver_token: {file: ./.secrets/resolver_token}
+  model_tokens: {file: ./.secrets/model_tokens}
+  es_password: {file: ./.secrets/es_password}
+  es_api_key: {file: ./.secrets/es_api_key}
+  otel_headers: {file: ./.secrets/otel_headers}
+volumes:
+  es-data:
+  uploads:
+networks:
+  evaluation:
+    name: ${EVAL_NETWORK:-evaluation-compose}

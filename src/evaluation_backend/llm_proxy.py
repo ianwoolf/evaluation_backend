@@ -57,6 +57,7 @@ def proxy_ssl_context(env):
 
 
 def create_proxy(env=None, client=None, telemetry=None):
+    from evaluation_backend.observability import configure_logging, event, instrument_app, shutdown_logging
     env = dict(os.environ if env is None else env)
     required = ('EVAL_MODEL_ID', 'EVAL_MODEL_RESOLVER_URL', 'EVAL_MODEL_RESOLVER_TOKEN', 'EVAL_LLM_PROXY_TOKEN')
     if any(not env.get(k) for k in required):
@@ -70,12 +71,17 @@ def create_proxy(env=None, client=None, telemetry=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        configure_logging('evaluation-model-proxy')
+        event('model_proxy.started')
         yield
         if owned:
             await client.aclose()
         await asyncio.to_thread(telemetry.flush)
+        event('model_proxy.stopped')
+        shutdown_logging()
 
     app = FastAPI(lifespan=lifespan)
+    instrument_app(app)
 
     @app.get('/health')
     def health():
@@ -95,6 +101,7 @@ def create_proxy(env=None, client=None, telemetry=None):
         allowed = {'messages', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'stop', 'seed', 'tools', 'tool_choice', 'parallel_tool_calls', 'response_format', 'presence_penalty', 'frequency_penalty', 'n', 'thinking'}
         payload = {k: v for k, v in body.items() if k in allowed}
         started = time.perf_counter()
+        event('model_proxy.invoke.started', model_id=env['EVAL_MODEL_ID'])
         metadata = {'model_id': env['EVAL_MODEL_ID'], 'experiment_id': env.get('EXPERIMENT_ID') or env.get('EVALUATE_ID', env.get('EVALUATION_ID', '')), 'client_stream': stream, 'request_parameters': {k: v for k, v in payload.items() if k != 'messages'}}
         trace_context = None
         import re
@@ -113,7 +120,8 @@ def create_proxy(env=None, client=None, telemetry=None):
             span.update(model=model['model'])
             upstream = await client.send(client.build_request('POST', model['address'].rstrip('/') + '/chat/completions', json=payload, headers={'Authorization': 'Bearer ' + model['token']}), stream=True)
             upstream.raise_for_status()
-        except Exception:
+        except Exception as error:
+            event('model_proxy.upstream.failed', level='ERROR', error=error, model_id=env['EVAL_MODEL_ID'])
             if upstream is not None:
                 await upstream.aclose()
             span.update(level='ERROR', status_message='model resolution or upstream request failed', metadata={**metadata, 'duration_ms': (time.perf_counter()-started)*1000})
@@ -144,7 +152,8 @@ def create_proxy(env=None, client=None, telemetry=None):
                     yield 'data: ' + data + '\n\n'
                 if not done:
                     raise ValueError('incomplete provider stream')
-            except BaseException:
+            except BaseException as error:
+                event('model_proxy.stream.failed', level='ERROR', error=error, model_id=env['EVAL_MODEL_ID'])
                 failed = True
                 span.update(level='ERROR', status_message='LLM stream interrupted')
                 raise
@@ -160,6 +169,8 @@ def create_proxy(env=None, client=None, telemetry=None):
                         metadata[key] = usage[key]
                 span.update(output=output.get('choices'), usage_details=usage_details, metadata=metadata)
                 span.end()
+                event('model_proxy.invoke.finished', status='FAILED' if failed else 'COMPLETED',
+                      duration_ms=round((time.perf_counter()-started)*1000, 2), model_id=env['EVAL_MODEL_ID'])
         if stream:
             return StreamingResponse(events(), media_type='text/event-stream', headers={'Cache-Control': 'no-cache'})
         try:
@@ -174,7 +185,7 @@ def create_proxy(env=None, client=None, telemetry=None):
 def main():
     import uvicorn
     load_config()
-    uvicorn.run(create_proxy(), host='127.0.0.1', port=int(os.getenv('EVAL_LLM_PROXY_PORT', '18090')))
+    uvicorn.run(create_proxy(), host='127.0.0.1', port=int(os.getenv('EVAL_LLM_PROXY_PORT', '18090')), access_log=False)
 
 
 if __name__ == '__main__':

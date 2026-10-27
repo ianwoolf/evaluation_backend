@@ -1,4 +1,5 @@
 """Reusable target configuration; temporary sample content is never stored here."""
+from evaluation_backend.observability import observed
 from typing import Literal
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,6 +52,7 @@ def get_config(ident:str,x_project_id:str=Header(min_length=1),service=Depends(g
 
 
 @router.post('/targets/{ident}/config')
+@observed('target_config.save', project_id='x_project_id', target_id='ident')
 def save_config(ident:str,value:TargetConfig,x_project_id:str=Header(min_length=1),service=Depends(get_service)):
     binding=selection(x_project_id,ident,value,service)
     try:current=service.storage.get('target-configs',x_project_id,ident)
@@ -68,6 +70,7 @@ class TriggerTarget(BaseModel):
 
 
 @router.post('/targets/{ident}/runs')
+@observed('target.trigger', project_id='x_project_id', target_id='ident')
 def trigger(ident:str,value:TriggerTarget,x_project_id:str=Header(min_length=1),idempotency_key:str=Header(min_length=16,max_length=128),service=Depends(get_service),cluster=Depends(kube)):
     config=service.storage.get('target-configs',x_project_id,ident)
     if config['_revision']!=value.config_revision:raise Conflict('Target config changed; reload before triggering')

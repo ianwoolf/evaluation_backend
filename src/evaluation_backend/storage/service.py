@@ -1,4 +1,5 @@
 """Versioned dataset and result service; independent of Elasticsearch."""
+from evaluation_backend.observability import observed
 from copy import deepcopy
 from functools import lru_cache
 from datetime import datetime, timezone
@@ -73,6 +74,7 @@ class EvaluationStorageService:
     def __init__(self, storage: Storage):
         self.storage = storage
 
+    @observed('dataset.save', project_id='project')
     def save_dataset(self, project, dataset: DatasetDocument):
         value = dataset.model_dump(mode='json', exclude={'revision'})
         try:
@@ -86,6 +88,7 @@ class EvaluationStorageService:
             raise Conflict('Published versions are immutable; append one new version at a time')
         return public(self.storage.put('datasets', project, dataset.id, value, revision=dataset.revision))
 
+    @observed('dataset.load', project_id='project', dataset_id='ident', version='version')
     def dataset_version(self, project, ident, version):
         dataset = self.storage.get('datasets', project, ident)
         for item in dataset['versions']:
@@ -96,6 +99,45 @@ class EvaluationStorageService:
     def page(self, collection, project, **kwargs):
         result = self.storage.search(collection, project, **kwargs)
         return {**result, 'items': [public(v) for v in result['items']]}
+
+    def scores(self, project, evaluation_id, *, offset=0, limit=100):
+        """Compatibility endpoint: scores have one source of truth, their sample."""
+        import json
+        items, total, cursor = [], 0, 0
+        while True:
+            page = self.storage.search('samples', project, filters={'evaluation_id': evaluation_id},
+                                       offset=cursor, limit=100)
+            for sample in page['items']:
+                for score in sample.get('scores', []):
+                    if offset <= total < offset + limit:
+                        ident = json.dumps([evaluation_id, sample['sample_id'], score['scorerId']])
+                        items.append({**score, 'id': ident, 'evaluation_id': evaluation_id,
+                                      'sample_id': sample['sample_id'], 'scorer_id': score['scorerId'],
+                                      'created_at': sample.get('created_at')})
+                    total += 1
+            cursor += len(page['items'])
+            if not page['items'] or cursor >= page['total']:
+                break
+        return {'items': items, 'total': total}
+
+    def score_summary(self, project, evaluation_id):
+        groups, cursor = {}, 0
+        while True:
+            page = self.storage.search('samples', project, filters={'evaluation_id': evaluation_id},
+                                       offset=cursor, limit=100)
+            for sample in page['items']:
+                for score in sample.get('scores', []):
+                    key = (score['scorerId'], score.get('scorerVersion'))
+                    group = groups.setdefault(key, {'scorer_id': key[0], 'scorer_version': key[1],
+                        'scored_samples': 0, 'passed_samples': 0, 'sum': 0})
+                    group['scored_samples'] += 1
+                    group['passed_samples'] += int(score['passed'])
+                    group['sum'] += score['value']
+            cursor += len(page['items'])
+            if not page['items'] or cursor >= page['total']:
+                break
+        return [{**{k: v for k, v in g.items() if k != 'sum'},
+                 'average': g['sum'] / g['scored_samples']} for g in groups.values()]
 
 
 @lru_cache(maxsize=1)

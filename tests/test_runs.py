@@ -73,7 +73,7 @@ def test_launch_idempotency_pinning_and_project_isolation(setup):
     assert client.post('/api/v1/evaluations/runs', json=body, headers=headers).json()['id'] == run['id']
     assert cluster.created == 1
     job = cluster.saved[run['id']]
-    env = {e['name']: e['value'] for e in job['spec']['template']['spec']['containers'][0]['env']}
+    env = {e['name']: e['value'] for e in job['spec']['template']['spec']['containers'][0]['env'] if 'value' in e}
     assert env['DATASET_ID'] == 'd'
     assert env['EVAL_DATASET_VERSION'] == '1'
     assert env['EVAL_RUN_INPUT_ID'] == run['experiment_id']
@@ -142,7 +142,7 @@ def test_run_uses_database_environment_and_trusted_target(setup):
     assert response.status_code==200,response.text
     run=response.json();job=k.saved[run['id']]
     assert job['spec']['template']['spec']['containers'][0]['resources']['limits']=={'cpu':'750m','memory':'768Mi'}
-    env={v['name']:v['value'] for v in job['spec']['template']['spec']['containers'][0]['env']}
+    env={v['name']:v['value'] for v in job['spec']['template']['spec']['containers'][0]['env'] if 'value' in v}
     target=json.loads(env['EVAL_TARGET_SNAPSHOT'])
     environment=json.loads(env['EVAL_ENVIRONMENT_SNAPSHOT'])
     assert environment['id']=='e' and environment['version']==1

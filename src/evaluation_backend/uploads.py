@@ -1,4 +1,5 @@
 """API-owned private temporary files; only metadata is stored in SQLite."""
+from evaluation_backend.observability import observed
 import csv
 import io
 import json
@@ -20,6 +21,7 @@ class UploadError(ValueError):
     pass
 
 
+@observed('upload.validate')
 def parse_upload(data, filename, schema):
     if not data or len(data) > MAX_BYTES: raise UploadError('File must contain 1 to 8,000,000 bytes')
     suffix = Path(filename).suffix.lower()
@@ -115,6 +117,7 @@ class UploadStore:
             with db: yield db
         finally: db.close()
 
+    @observed('upload.create', project_id='project', dataset_id='dataset')
     def create(self, project, dataset, version, schema, rows):
         ident = 'upload-' + uuid.uuid4().hex
         path = self.root / (ident + '.json')
@@ -135,6 +138,7 @@ class UploadStore:
         if row is None or row['deleted'] or row['expires'] <= time.time(): raise UploadError('Upload not found or expired')
         return row
 
+    @observed('upload.claim', project_id='project', upload_id='ident', run_id='experiment')
     def claim(self, project, ident, dataset, version, job, experiment):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -144,6 +148,7 @@ class UploadStore:
             db.execute('UPDATE uploads SET job=?, experiment=?, expires=? WHERE id=?', (job,experiment,time.time()+86400,ident))
             return row['count']
 
+    @observed('upload.read', project_id='project', upload_id='ident', run_id='experiment')
     def read(self, project, ident, experiment):
         with self.connect() as db:
             row = self._row(db,project,ident)
@@ -151,6 +156,7 @@ class UploadStore:
             try: return json.loads((self.root / (row['id'] + '.json')).read_text())
             except FileNotFoundError: raise UploadError('Upload content has been deleted') from None
 
+    @observed('upload.delete', project_id='project', upload_id='ident')
     def delete(self, project, ident):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')

@@ -1,0 +1,35 @@
+# Optional strategic-merge patch for an existing single-node ES StatefulSet.
+# Create evaluation-credentials first. Does not change image or PVC.
+spec:
+  template:
+    spec:
+      containers:
+        - name: elasticsearch
+          env:
+            - name: xpack.security.enabled
+              value: 'true'
+            - name: xpack.security.http.ssl.enabled
+              value: 'false'
+            - name: ELASTIC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: evaluation-credentials
+                  key: EVAL_ES_PASSWORD
+          startupProbe:
+            httpGet: null
+            exec:
+              command:
+                - bash
+                - -ec
+                - 'curl --silent --fail --max-time 3 --user "elastic:${ELASTIC_PASSWORD}" http://127.0.0.1:9200/_cluster/health >/dev/null'
+            timeoutSeconds: 5
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            httpGet: null
+            exec:
+              command:
+                - bash
+                - -ec
+                - 'curl --silent --fail --max-time 3 --user "elastic:${ELASTIC_PASSWORD}" "http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=1s" >/dev/null'
+            timeoutSeconds: 5

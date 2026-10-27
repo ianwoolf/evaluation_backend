@@ -56,7 +56,10 @@ def test_worker_none_never_constructs_model_target(monkeypatch, capsys):
     assert run.call_args.args[-1] is None
     output=capsys.readouterr().out
     event=next(json.loads(line) for line in output.splitlines() if json.loads(line).get('event')=='evaluation.environment')
-    assert event['environment']==environment
+    assert event['environment_id'] == environment['id']
+    assert event['model_id'] == 'none'
+    assert event['cpu_millicores'] == 500
+    assert 'environment' not in event
     assert 'must-not-print-this-token' not in output
 
 

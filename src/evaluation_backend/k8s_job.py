@@ -41,8 +41,13 @@ def build_job(dataset_id, model_id, scorer_ids, *, namespace='evaluation', image
                          'securityContext': {'runAsNonRoot': True, 'runAsUser': 10001, 'runAsGroup': 10001, 'fsGroup': 10001, 'seccompProfile': {'type': 'RuntimeDefault'}},
                          'containers': [{'name': 'worker', 'image': image, 'imagePullPolicy': 'IfNotPresent',
                              'command': ['python', '-m', 'evaluation_backend.proxy_entrypoint', '--', 'python', '-m', 'evaluation_backend.worker'],
-                             'envFrom': [{'configMapRef': {'name': 'evaluation-runtime'}}, {'secretRef': {'name': 'evaluation-runner'}}],
-                             'env': [{'name': k, 'value': v} for k, v in values.items()],
+                             'envFrom': [{'configMapRef': {'name': 'evaluation-runtime'}},
+                                         {'configMapRef': {'name': 'evaluation-storage'}},
+                                         {'configMapRef': {'name': 'evaluation-observability', 'optional': True}}],
+                             'env': [{'name': k, 'value': v} for k, v in values.items()] + [
+                                 {'name': key, 'valueFrom': {'secretKeyRef': {'name':'evaluation-credentials','key':key,
+                                     'optional':key != 'EVAL_MODEL_RESOLVER_TOKEN'}}}
+                                 for key in ('EVAL_MODEL_RESOLVER_TOKEN','EVAL_ES_PASSWORD','EVAL_ES_API_KEY','OTEL_EXPORTER_OTLP_LOGS_HEADERS')],
                              'resources': (resources or PodResources()).kubernetes(),
                              'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True, 'capabilities': {'drop': ['ALL']}},
                              'volumeMounts': [{'name': 'tmp', 'mountPath': '/tmp'}, {'name': 'home', 'mountPath': '/home/worker'}]}],

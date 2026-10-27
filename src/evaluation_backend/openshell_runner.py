@@ -1,4 +1,5 @@
 """OpenShell lifecycle; modes select explicit gateways, never raw containers."""
+from evaluation_backend.observability import observed
 import json
 import os
 import re
@@ -36,6 +37,7 @@ class OpenShellRunner:
         if not 1 <= self.timeout <= 604800:
             raise ValueError('invalid execution timeout')
 
+    @observed('openshell.command')
     def command(self, args, timeout):
         # Do not inherit host provider tokens for CLI auto-discovery.
         clean = {k: v for k, v in os.environ.items() if k in {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'XDG_CONFIG_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR'}}
@@ -45,6 +47,7 @@ class OpenShellRunner:
             raise RuntimeError('OpenShell command failed; inspect named sandbox logs')
         return result
 
+    @observed('openshell.execute')
     def run(self):
         from evaluation_backend.telemetry import prepare_experiment
         experiment_id = prepare_experiment(self.env, fresh=True)
@@ -85,6 +88,7 @@ class OpenShellRunner:
 
 
 def main():
+    from evaluation_backend.observability import configure_logging, event, shutdown_logging
     def cancelled(signum, frame):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, cancelled)
@@ -95,10 +99,13 @@ def main():
     args = parser.parse_args()
     try:
         load_config(args.config)
+        configure_logging('evaluation-openshell-runner')
         OpenShellRunner().run()
     except (Exception, KeyboardInterrupt) as error:
-        print(json.dumps({'status': 'FAILED', 'error_type': type(error).__name__}), file=sys.stderr)
+        event('openshell.failed', level='ERROR', error=error)
         return 1
+    finally:
+        shutdown_logging()
     return 0
 
 

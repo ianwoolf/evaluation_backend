@@ -5,6 +5,8 @@ __pycache__
 .pytest_cache
 .env
 .env.*
+**/.env
+**/.secrets
 data
 dist
 build

@@ -41,8 +41,11 @@ def cleanup_run(service,project,evaluation):
 
 
 def reconcile_uploads():
-    from evaluation_backend.runs import Kubernetes
-    cluster=Kubernetes()
+    from evaluation_backend.runs import kube
+    cluster=kube()
+    if cluster.namespace == 'docker':
+        # Enforce deadlines even when no browser is polling a Docker run.
+        cluster.call('GET', cluster.jobs)
     def terminal(name):
         try:job=cluster.call('GET',cluster.jobs+'/'+name)
         except HTTPException as e:

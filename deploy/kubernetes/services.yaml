@@ -10,12 +10,51 @@ metadata:
   namespace: evaluation
 data:
   EVAL_MODEL_RESOLVER_URL: http://evaluation-api.evaluation.svc.cluster.local:8001
-  EVAL_ES_URL: http://evaluation-es:9200
   EVAL_COLLECTOR_EXPORTER: elasticsearch
   EVAL_PLATFORM: storage
   EVAL_LLM_PROXY_ENABLED: 'true'
   EVAL_CONCURRENCY: '1'
   EVAL_STORAGE_API_URL: http://evaluation-api.evaluation.svc.cluster.local:8001
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evaluation-storage
+  namespace: evaluation
+data:
+  EVAL_STORAGE_BACKEND: elasticsearch
+  EVAL_ES_URL: http://evaluation-es:9200
+  EVAL_ES_VERIFY_SSL: 'false'
+  EVAL_ES_USERNAME: ''
+  EVAL_ES_RECORDS_INDEX: evaluation-records-v2
+  EVAL_ES_SAMPLES_INDEX: evaluation-samples-v2
+  EVAL_ES_TRACES_INDEX: evaluation-traces-v1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evaluation-observability
+  namespace: evaluation
+data:
+  EVAL_LOG_LEVEL: INFO
+  # Optional external OTLP HTTP/protobuf logs receiver:
+  # OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel-collector:4318/v1/logs
+  # OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evaluation-api-config
+  namespace: evaluation
+data:
+  EVAL_AUTH_MODE: none
+  EVAL_DEFAULT_PROJECT_ID: individual
+  EVAL_EXECUTION_BACKEND: kubernetes
+  EVAL_MODEL_REGISTRY: /config/models.json
+  EVAL_RESOURCE_BINDINGS_FILE: /config/bindings.json
+  EVAL_WORKER_IMAGE: evaluation-worker:deploy-v2
+  EVAL_UPLOAD_DIR: /uploads
+  EVAL_CONTENT_POLICY: '{"input":"retain","response":"retain","reference":"retain"}'
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -57,7 +96,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: ianwoolf/evaluation-worker:20261025-env-v1
+        image: evaluation-worker:deploy-v2
         imagePullPolicy: IfNotPresent
         command:
         - python
@@ -68,34 +107,18 @@ spec:
         - 0.0.0.0
         - --port
         - '8001'
+        - --no-access-log
         ports:
         - containerPort: 8001
-        env:
-        - name: EVAL_MODEL_REGISTRY
-          value: /config/models.json
-        - name: EVAL_MODEL_RESOLVER_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: evaluation-models
-              key: resolver-token
-        - name: EVAL_TRIGGER_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: evaluation-trigger
-              key: token
-        - name: EVAL_WORKER_IMAGE
-          value: ianwoolf/evaluation-worker:20261025-env-v1
-        - name: EVAL_RESOURCE_BINDINGS
-          value: '[{"target_id": "guardrail-privacy", "dataset_id": "ds-guardrail",
-            "dataset_version": 1, "environment_id": "env-isolated", "model_id": "glm-dev"}]'
-        - name: EVAL_STORAGE_BACKEND
-          value: elasticsearch
-        - name: EVAL_ES_URL
-          value: http://evaluation-es:9200
-        - name: EVAL_UPLOAD_DIR
-          value: /uploads
-        - name: EVAL_CONTENT_POLICY
-          value: '{"input":"retain","response":"retain","reference":"retain"}'
+        envFrom:
+        - configMapRef:
+            name: evaluation-api-config
+        - configMapRef:
+            name: evaluation-storage
+        - secretRef:
+            name: evaluation-credentials
+        - configMapRef:
+            name: evaluation-observability
         volumeMounts:
         - name: models
           mountPath: /config
@@ -129,12 +152,12 @@ spec:
           initialDelaySeconds: 10
       volumes:
       - name: models
-        secret:
-          secretName: evaluation-models
-          items:
-          - key: models.json
-            path: models.json
-          defaultMode: 288
+        projected:
+          sources:
+          - configMap:
+              name: evaluation-model-registry
+          - configMap:
+              name: evaluation-resource-bindings
       - name: tmp
         emptyDir: {}
       - name: uploads

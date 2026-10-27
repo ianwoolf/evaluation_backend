@@ -4,6 +4,8 @@ This is a Python collector service, not the upstream Collector distribution.
 OTLP protobuf/gRPC are intentionally not advertised.
 """
 import os
+from contextlib import asynccontextmanager
+from evaluation_backend.observability import configure_logging, event, instrument_app, shutdown_logging
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from evaluation_backend.runs import authorize
@@ -21,7 +23,16 @@ def create_collector():
     if backend != 'elasticsearch':
         raise ValueError('Unknown collector exporter')
     policy = ContentPolicy.from_env()
-    app = FastAPI(title='Runner collector')
+    @asynccontextmanager
+    async def lifespan(app):
+        configure_logging('evaluation-collector')
+        event('collector.started')
+        try:
+            yield
+        finally:
+            event('collector.stopped')
+            shutdown_logging()
+    app = FastAPI(title='Runner collector', lifespan=lifespan)
     app.include_router(router)
 
     @app.middleware('http')
@@ -37,6 +48,7 @@ def create_collector():
 
     @app.exception_handler(StorageError)
     async def storage_error(request, error):
+        event('collector.storage.failed', level='WARNING' if isinstance(error, (NotFound, Conflict)) else 'ERROR', error=error)
         return JSONResponse(status_code=404 if isinstance(error, NotFound) else 409 if isinstance(error, Conflict) else 503,
                             content={'detail': str(error)})
 
@@ -63,6 +75,7 @@ def create_collector():
                         'data': policy.trace_data({'span': span, 'resource': resource.get('resource', {}), 'scope': scope.get('scope', {})})})
         return {}
 
+    instrument_app(app)
     return app
 
 
@@ -70,7 +83,7 @@ def main():
     import uvicorn
     # Exporter choice is process-local; storage credentials stay in collector env.
     os.environ['EVAL_STORAGE_BACKEND'] = os.getenv('EVAL_COLLECTOR_EXPORTER', 'elasticsearch')
-    uvicorn.run(create_collector(), host='127.0.0.1', port=int(os.getenv('EVAL_COLLECTOR_PORT', '18091')))
+    uvicorn.run(create_collector(), host='127.0.0.1', port=int(os.getenv('EVAL_COLLECTOR_PORT', '18091')), access_log=False)
 
 
 if __name__ == '__main__':

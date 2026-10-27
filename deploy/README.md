@@ -1,5 +1,20 @@
 # Evaluation backend：新电脑 Kubernetes 部署
 
+当前按部署平台分目录：
+
+| 方式 | 入口 | runner |
+| --- | --- | --- |
+| Docker Compose | [docker-compose/README.md](docker-compose/README.md) | 独立 Docker 容器，无 Kubernetes 依赖 |
+| Kubernetes | [kubernetes/README.md](kubernetes/README.md) | K8s Job |
+
+新的 K8s 活动配置仅用 `evaluation-credentials` 保存凭据，模型和绑定 JSON 放 ConfigMap。
+当前应用镜像标签为 `evaluation-worker:deploy-v2`。下文旧标签仅用于历史完整平台部署。
+
+当前默认是单用户精简部署：`services.yaml` 使用 `EVAL_AUTH_MODE=none`，镜像为
+`evaluation-worker:standalone`；主工程 UI 使用 `web/deploy/kubernetes/evaluation-ui.yaml`。
+不需要 Control API 或 PostgreSQL。完整步骤优先参考主工程 `web/deploy/STANDALONE.md`。
+下文保留旧全功能部署/已发布镜像说明，旧标签不包含最新精简模式，应从当前源码构建。
+
 已发布镜像地址及架构见 [IMAGES.md](IMAGES.md)。当前上传镜像仅支持 linux/arm64。
 
 

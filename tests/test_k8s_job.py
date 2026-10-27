@@ -11,11 +11,15 @@ def test_fresh_identity_and_secret_references():
     pod = a['spec']['template']
     assert pod['metadata']['labels']['experiment_id'] == ident
     worker = pod['spec']['containers'][0]
-    env = {x['name']: x['value'] for x in worker['env']}
+    env = {x['name']: x['value'] for x in worker['env'] if 'value' in x}
     assert all(env[k] == ident for k in ('EXPERIMENT_ID', 'EVALUATE_ID', 'EVALUATION_ID'))
     assert env['EVAL_SCORER_MODE'] == 'mock'
     assert env['SCORER_IDS'] == '["mock-score"]'
-    assert worker['envFrom'][1]['secretRef']['name'] == 'evaluation-runner'
+    assert all('configMapRef' in item for item in worker['envFrom'])
+    assert worker['envFrom'][1]['configMapRef']['name'] == 'evaluation-storage'
+    refs = {x['name']:x['valueFrom']['secretKeyRef'] for x in worker['env'] if 'valueFrom' in x}
+    assert refs['EVAL_MODEL_RESOLVER_TOKEN']['name'] == 'evaluation-credentials'
+    assert 'EVAL_TRIGGER_TOKEN' not in refs
     assert 'LANGFUSE_SECRET_KEY' not in json.dumps(a)
     assert not pod['spec']['automountServiceAccountToken']
     assert a['spec']['backoffLimit'] == 0

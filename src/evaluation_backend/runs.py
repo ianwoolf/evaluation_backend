@@ -1,4 +1,6 @@
 """Authenticated, project-scoped evaluation Jobs. Kubernetes stores run snapshots."""
+from evaluation_backend.observability import observed
+from evaluation_backend.observability import event
 import hashlib
 import hmac
 import json
@@ -23,6 +25,10 @@ PREFIX = 'evaluation.tasklattice.io/'
 
 
 async def authorize(request: Request, authorization: str = Header(default='')):
+    if (os.getenv('EVAL_AUTH_MODE', 'token') == 'none' and not authorization
+            and os.getenv('EVAL_COLLECTOR_LOCAL') != 'true'
+            and request.url.path.startswith('/api/v1/evaluations/')):
+        return
     token = os.getenv('EVAL_TRIGGER_TOKEN', '')
     if not token: raise HTTPException(503, 'Evaluation trigger is not configured')
     if hmac.compare_digest(authorization, 'Bearer ' + token): return
@@ -49,6 +55,8 @@ class StartRun(BaseModel):
 def bindings():
     # Only server-owned bindings may choose real resources; never accept Pod specs.
     value = os.getenv('EVAL_RESOURCE_BINDINGS', '')
+    if not value and os.getenv('EVAL_RESOURCE_BINDINGS_FILE'):
+        value = Path(os.environ['EVAL_RESOURCE_BINDINGS_FILE']).read_text()
     if not value:
         raise HTTPException(503, 'Evaluation resource bindings are not configured')
     return json.loads(value)
@@ -62,6 +70,7 @@ class Kubernetes:
         self.namespace = os.getenv('EVAL_K8S_NAMESPACE', 'evaluation')
         self.ca = str(root / 'ca.crt')
 
+    @observed('kubernetes.request', method='method')
     def call(self, method, path, **kwargs):
         import ssl
         with httpx.Client(verify=ssl.create_default_context(cafile=self.ca), trust_env=False, timeout=20) as client:
@@ -81,6 +90,9 @@ class Kubernetes:
 
 
 def kube():
+    if os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes') == 'docker':
+        from evaluation_backend.docker_runtime import DockerRuntime
+        return DockerRuntime()
     return Kubernetes()
 
 
@@ -134,6 +146,8 @@ def summary(job, cluster, service=None, project=None):
         except NotFound:
             pass
     return {**record, 'id': meta['name'], 'created_at': meta.get('creationTimestamp'), 'status': status,
+            'runtime': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'),
+            'container_name': cluster.container_name(meta['name']) if hasattr(cluster, 'container_name') else None,
             'experiment_id': meta['labels']['experiment_id'], 'completed': completed,
             'error': error, 'phase': status if status != 'RUNNING' else 'RUNNING' if job.get('status', {}).get('active') else 'QUEUED'}
 
@@ -147,11 +161,12 @@ def target_catalog():
 
 @router.get('/config', dependencies=[Depends(authorize)])
 def configuration():
-    return {'runtime': 'kubernetes', 'bindings': bindings(), 'scoring_modes': ['mock', 'installed'],
+    return {'runtime': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'bindings': bindings(), 'scoring_modes': ['mock', 'installed'],
             'target_mode': 'llm', 'scorer_ids': ['mock-score', 'sc-risk']}
 
 
 @router.post('/runs', dependencies=[Depends(authorize)])
+@observed('evaluation.trigger', project_id='x_project_id')
 def start(request: StartRun, x_project_id: str = Header(min_length=1),
           idempotency_key: str = Header(min_length=16, max_length=128), cluster=Depends(kube), service=Depends(get_service)):
     binding = next((b for b in bindings() if b['target_id'] == request.target_id
@@ -163,6 +178,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     digest = hashlib.sha256(json.dumps(request.model_dump(), sort_keys=True).encode()).hexdigest()
     name = 'eval-' + hashlib.sha256((x_project_id + ':' + idempotency_key).encode()).hexdigest()[:24]
     experiment = 'exp-' + hashlib.sha256((x_project_id + ':' + idempotency_key).encode()).hexdigest()[:32]
+    event('evaluation.identified', project_id=x_project_id, run_id=experiment, job_name=name,
+          dataset_id=request.dataset_id, target_id=request.target_id, environment_id=request.environment_id)
     try:
         previous = owned(cluster.call('GET', cluster.jobs + '/' + name), x_project_id)
     except HTTPException as error:
@@ -170,6 +187,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     else:
         if previous['metadata']['annotations'][PREFIX + 'request-hash'] != digest:
             raise HTTPException(409, 'Idempotency key was used for different configuration')
+        event('evaluation.trigger.reused', run_id=experiment, job_name=name)
         return summary(previous, cluster, service, x_project_id)
     from evaluation_backend.environments import environment_version
     from evaluation_backend.targets import targets
@@ -199,6 +217,13 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         except UploadError as error: raise HTTPException(422, str(error)) from None
     context = {'id': experiment, 'target': target, 'environment': environment, 'dataset_id': request.dataset_id, 'dataset_version': request.dataset_version,
                'upload_id': request.upload_id, 'content_policy': ContentPolicy.from_env().model_dump(), 'request_hash': digest}
+    from zoneinfo import ZoneInfo
+    generated_name = target['name'][:150] + ' · ' + datetime.now(ZoneInfo(os.getenv('EVAL_NAME_TIMEZONE', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S')
+    context.update(name=request.name.strip() or generated_name, job_name=name,
+                   target_id=request.target_id, environment_id=request.environment_id,
+                   environment_version=request.environment_version, scorer_ids=request.scorer_ids,
+                   scoring_mode=request.scoring_mode, total_samples=count,
+                   created_at=datetime.now(timezone.utc).isoformat())
     try: service.storage.put('run-contexts', x_project_id, experiment, context, create=True)
     except Conflict:
         context = service.storage.get('run-contexts', x_project_id, experiment)
@@ -212,13 +237,11 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     snapshot = {'target': target, 'datasetId': request.dataset_id,
                 'dataset': {k: version[k] for k in ('name', 'version', 'publishedAt', 'fields')},
                 'environmentId': request.environment_id,
-                'environment': {**environment, 'modelId': request.model_id, 'runner': {'id': 'kubernetes', 'concurrency': 1}},
+                'environment': {**environment, 'modelId': request.model_id, 'runner': {'id': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'concurrency': 1}},
                 'scorers': []}
     snapshot['dataset'].update(rows=[], objective='', description='', tags=[], metadata={}, scorerIds=[])
     record = {k: v for k,v in request.model_dump().items() if k not in ('snapshot', 'upload_id')}
-    from zoneinfo import ZoneInfo
-    generated_name = target['name'][:150] + ' · ' + datetime.now(ZoneInfo(os.getenv('EVAL_NAME_TIMEZONE', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S')
-    record.update(name=request.name.strip() or generated_name, snapshot=snapshot, sample_count=count, resources=resources.model_dump())
+    record.update(name=context.get('name', request.name.strip() or generated_name), snapshot=snapshot, sample_count=count, resources=resources.model_dump())
     job = build_job(request.dataset_id, request.model_id, request.scorer_ids,
                     namespace=cluster.namespace, image=os.environ['EVAL_WORKER_IMAGE'], mock=request.scoring_mode == 'mock', experiment_id=experiment, resources=resources)
     job['metadata']['name'] = name
@@ -244,6 +267,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         created = owned(cluster.call('GET', cluster.jobs + '/' + name), x_project_id)
         if created['metadata']['annotations'][PREFIX + 'request-hash'] != digest:
             raise HTTPException(409, 'Idempotency conflict')
+    event('evaluation.job.created', run_id=experiment, job_name=name, project_id=x_project_id)
     return summary(created, cluster, service, x_project_id)
 
 

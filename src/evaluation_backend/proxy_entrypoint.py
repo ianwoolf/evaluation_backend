@@ -7,10 +7,13 @@ import sys
 import time
 from urllib.request import urlopen
 from evaluation_backend.config import load_config
+from evaluation_backend.observability import configure_logging, event, shutdown_logging, observed
 
 
 def main():
     load_config()
+    configure_logging('evaluation-supervisor')
+    event('supervisor.started')
     from evaluation_backend.telemetry import prepare_experiment
     prepare_experiment(os.environ)
     command = sys.argv[1:]
@@ -24,14 +27,16 @@ def main():
     collector_env = dict(os.environ)
     collector_env['EVAL_COLLECTOR_LOCAL'] = 'true'
     collector_env['EVAL_TRIGGER_TOKEN'] = os.environ.get('EVAL_STORAGE_TOKEN', '')
-    collector = subprocess.Popen([sys.executable, '-m', 'evaluation_backend.collector'], env=collector_env)
     proxy_env = {k: v for k, v in os.environ.items() if not k.startswith('EVAL_ES_')}
-    proxy = None if os.getenv('EVAL_MODEL_ID') == 'none' else subprocess.Popen([sys.executable, '-m', 'evaluation_backend.llm_proxy'], env=proxy_env)
-    child = None
+    collector = proxy = child = None
     def stop(signum, frame):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, stop)
     try:
+        collector = subprocess.Popen([sys.executable, '-m', 'evaluation_backend.collector'], env=collector_env)
+        event('runner.service.spawned', component='collector')
+        proxy = None if os.getenv('EVAL_MODEL_ID') == 'none' else subprocess.Popen([sys.executable, '-m', 'evaluation_backend.llm_proxy'], env=proxy_env)
+        event('runner.service.skipped' if proxy is None else 'runner.service.spawned', component='model-proxy')
         for _ in range(120):
             if (proxy is not None and proxy.poll() is not None) or collector.poll() is not None:
                 raise RuntimeError('Runner service failed to start')
@@ -45,21 +50,28 @@ def main():
                 time.sleep(.5)
         else:
             raise RuntimeError('LLM proxy startup timeout')
+        event('runner.services.ready')
         env = dict(os.environ)
         env['EVAL_LLM_PROXY_ENABLED'] = 'false'
         if proxy is not None:
             env.update(OPENAI_BASE_URL=f'http://127.0.0.1:{port}/v1', OPENAI_API_BASE=f'http://127.0.0.1:{port}/v1', OPENAI_API_KEY=env['EVAL_LLM_PROXY_TOKEN'])
         # Workload needs only the local proxy credential, not resolver/provider credentials.
         env.pop('EVAL_MODEL_RESOLVER_TOKEN', None)
+        env.pop('EVAL_MODEL_RESOLVER_TOKEN_FILE', None)
         for key in list(env):
             if key.startswith('EVAL_ES_'):
                 env.pop(key)
         child = subprocess.Popen(command, env=env)
+        event('runner.workload.started')
         while child.poll() is None:
             if (proxy is not None and proxy.poll() is not None) or collector.poll() is not None:
                 raise RuntimeError('Runner service exited during workload')
             time.sleep(.2)
+        event('runner.workload.finished', exit_code=child.returncode, level='ERROR' if child.returncode else 'INFO')
         return child.returncode
+    except BaseException as error:
+        event('supervisor.failed', level='ERROR', error=error)
+        raise
     finally:
         for process in (child, proxy, collector):
             if process is not None and process.poll() is None:
@@ -67,9 +79,19 @@ def main():
                 try:
                     process.wait(timeout=15)
                 except subprocess.TimeoutExpired:
+                    event('runner.process.kill_required', level='WARNING')
                     process.kill()
                     process.wait()
+        event('supervisor.stopped')
+        shutdown_logging()
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        code = main()
+    except (Exception, KeyboardInterrupt) as error:
+        event('supervisor.exit.failed', level='ERROR', error=error)
+        code = 1
+    finally:
+        shutdown_logging()
+    raise SystemExit(code)

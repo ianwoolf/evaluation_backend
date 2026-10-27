@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from evaluation_backend.experiment import Settings, run_experiment
 from evaluation_backend.scorers import InstalledScorerLibrary
+from evaluation_backend.observability import configure_logging, event, shutdown_logging
 
 
 class HttpGuardrail:
@@ -48,6 +49,8 @@ def main():
         if not isinstance(values, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items()):
             parser.error('invalid environment file')
         os.environ.update(values)
+    configure_logging('evaluation-worker')
+    event('worker.started')
     if os.getenv('EVAL_LLM_PROXY_ENABLED', '').lower() == 'true' and not os.getenv('OPENAI_BASE_URL'):
         import subprocess
         import secrets
@@ -64,12 +67,13 @@ def main():
             if not isinstance(environment_info, dict):
                 raise ValueError('Environment snapshot must be an object')
             # Log only the selected Environment config, never process env or credentials.
-            print(json.dumps({'event': 'evaluation.environment', 'evaluation_id': settings.evaluation_id,
-                'environment': environment_info}, ensure_ascii=False), flush=True)
+            event('evaluation.environment', run_id=settings.evaluation_id, environment_id=environment_info.get('id'),
+                  model_id=environment_info.get('modelId'), cpu_millicores=environment_info.get('cpuMillicores'),
+                  memory_mib=environment_info.get('memoryMiB'))
         from evaluation_backend.targets import env_target
         target_info = env_target()
         if target_info:
-            print(json.dumps({'event': 'evaluation.target', 'evaluation_id': settings.evaluation_id, 'target': target_info}), flush=True)
+            event('evaluation.target', run_id=settings.evaluation_id, target_id=target_info.get('id'))
             from evaluation_backend.storage.client import StorageClient
             from evaluation_backend.storage.service import now
             StorageClient().trace({'id': 'target-' + settings.evaluation_id, 'evaluation_id': settings.evaluation_id,
@@ -88,13 +92,24 @@ def main():
         result = run_experiment(settings, platform, library, platform, target)
         result['experiment_id'] = settings.evaluation_id
         result['mock_scorer'] = scorer_mode == 'mock'
+        event('worker.finished', run_id=settings.evaluation_id, status=result['status'], count=result.get('items'),
+              level='ERROR' if result['status'] != 'COMPLETED' else 'INFO')
         print(json.dumps(result))
         return 0 if result['status'] == 'COMPLETED' else 1
     except Exception as error:
         # Vendor exceptions can contain auth headers or private sample data.
-        print(json.dumps({'status': 'FAILED', 'error_type': type(error).__name__}), file=sys.stderr)
+        event('worker.failed', level='ERROR', error=error, status='FAILED')
         return 1
+    finally:
+        shutdown_logging()
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        code = main()
+    except (Exception, KeyboardInterrupt) as error:
+        event('worker.startup.failed', level='ERROR', error=error)
+        code = 1
+    finally:
+        shutdown_logging()
+    raise SystemExit(code)

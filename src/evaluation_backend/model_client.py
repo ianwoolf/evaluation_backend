@@ -1,4 +1,5 @@
 """Model invocation port; task prompts and output parsing belong to targets."""
+from evaluation_backend.observability import observed
 import json
 import os
 from typing import Protocol
@@ -6,10 +7,12 @@ from urllib.request import Request, urlopen
 
 
 class ModelClient(Protocol):
+    @observed('model.invoke')
     def complete(self, messages: list[dict], *, options: dict | None = None) -> str: ...
 
 
 class OpenAICompatibleClient:
+    @observed('model.invoke')
     def complete(self, messages, *, options=None):
         payload = {**(options or {}), 'model': os.environ['EVAL_MODEL_ID'], 'messages': messages}
         request = Request(os.environ['OPENAI_BASE_URL'].rstrip('/') + '/chat/completions',
@@ -18,7 +21,9 @@ class OpenAICompatibleClient:
         try:
             with urlopen(request, timeout=120) as response:
                 return json.load(response)['choices'][0]['message']['content']
-        except Exception:
+        except Exception as error:
+            from evaluation_backend.observability import event
+            event('model.transport.failed', level='ERROR', error=error, model_id=os.getenv('EVAL_MODEL_ID'))
             raise RuntimeError('Model invocation failed') from None
 
 
@@ -33,6 +38,7 @@ def create_model_client() -> ModelClient:
 
 class MockModelClient:
     """Explicit integration-test adapter; never selected automatically."""
+    @observed('model.invoke')
     def complete(self, messages, *, options=None):
         from evaluation_backend.telemetry import create_telemetry
         span = create_telemetry().start_observation(name='mock.model', input=messages, metadata={'mock': True})

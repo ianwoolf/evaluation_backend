@@ -1,4 +1,5 @@
 """Project-scoped storage HTTP service. Browser requests use the Control proxy."""
+from evaluation_backend.observability import observed
 import json
 import math
 from typing import Any, Literal
@@ -85,6 +86,7 @@ def save_dataset(ident: str, value: DatasetDocument, x_project_id: str = Header(
 
 
 @router.post('/traces')
+@observed('trace.ingest', project_id='x_project_id')
 def save_trace(value: TraceDocument, x_project_id: str = Header(min_length=1), service=Depends(get_service)):
     if len(value.model_dump_json().encode()) > 1_000_000:
         raise HTTPException(413, 'Trace exceeds 1 MB')
@@ -104,10 +106,11 @@ def traces(evaluation_id: str, x_project_id: str = Header(min_length=1), offset:
 @router.get('/scores')
 def scores(evaluation_id: str, x_project_id: str = Header(min_length=1), offset: int = Query(0, ge=0, le=9900),
            limit: int = Query(100, ge=1, le=100), service=Depends(get_service)):
-    return service.page('scores', x_project_id, filters={'evaluation_id': evaluation_id}, offset=offset, limit=limit)
+    return service.scores(x_project_id, evaluation_id, offset=offset, limit=limit)
 
 
 @router.post('/experiments/{ident}/samples')
+@observed('sample.ingest', project_id='x_project_id', run_id='ident')
 def save_sample(ident: str, value: SampleDocument, x_project_id: str = Header(min_length=1), service=Depends(get_service)):
     if len(value.model_dump_json().encode()) > 2_000_000:
         raise HTTPException(413, 'Sample exceeds 2 MB')
@@ -115,15 +118,12 @@ def save_sample(ident: str, value: SampleDocument, x_project_id: str = Header(mi
     stamp = now()
     filtered = policy_for(service, x_project_id, ident).sample(value.model_dump())
     sample = {**filtered, 'evaluation_id': ident, 'sample_id': value.id, 'created_at': stamp}
-    for score in filtered['scores']:
-        score_id = json.dumps([ident, value.id, score['scorerId']])
-        service.storage.put('scores', x_project_id, score_id, {**score, 'id': score_id,
-            'evaluation_id': ident, 'sample_id': value.id, 'scorer_id': score['scorerId'], 'created_at': stamp})
     trace_id = json.dumps([ident, value.id])
     service.storage.put('traces', x_project_id, trace_id, {'id': trace_id, 'evaluation_id': ident,
-        'sample_id': value.id, 'created_at': stamp, 'name': 'evaluation.sample', 'data': sample,
+        'sample_id': value.id, 'created_at': stamp, 'name': 'evaluation.sample',
+        'data': {k: filtered[k] for k in ('trace', 'latencyMs', 'modelLatencyMs') if k in filtered},
         **trace_target(service, x_project_id, ident)})
-    # The sample is the commit marker, written after its trace and scores.
+    # The sample (including all scores) is the commit marker, written after its trace.
     return public(service.storage.put('samples', x_project_id, trace_id, sample))
 
 
@@ -134,9 +134,14 @@ def samples(ident: str, x_project_id: str = Header(min_length=1), offset: int = 
 
 
 @router.post('/experiments/{ident}')
+@observed('run.summary.save', project_id='x_project_id', run_id='ident')
 def save_experiment(ident: str, value: ExperimentDocument, x_project_id: str = Header(min_length=1), service=Depends(get_service)):
+    stamp = now()
+    summary = {'updated_at': stamp}
+    if value.status != 'RUNNING':
+        summary.update(finished_at=stamp, score_summary=service.score_summary(x_project_id, ident))
     return public(service.storage.put('experiments', x_project_id, ident,
-        {**value.model_dump(), 'id': ident, 'evaluation_id': ident, 'created_at': now()}))
+        {**value.model_dump(), **summary, 'id': ident, 'evaluation_id': ident, 'created_at': stamp}))
 
 
 @router.get('/experiments/{ident}')
@@ -145,6 +150,7 @@ def get_experiment(ident: str, x_project_id: str = Header(min_length=1), service
 
 
 @router.get('/reports/{ident}')
+@observed('report.read', project_id='x_project_id', run_id='ident')
 def report(ident: str, x_project_id: str = Header(min_length=1), offset: int = Query(0, ge=0, le=9900),
            limit: int = Query(100, ge=1, le=100), service=Depends(get_service)):
     """Read by experiment/evaluation ID, not Kubernetes Job name. Results may be partial."""

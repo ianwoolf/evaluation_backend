@@ -41,7 +41,7 @@ def test_upload_validate_launch_scoped_read_policy_and_cleanup(live):
     assert 'CANARY' not in json.dumps(job)
     assert not run['snapshot']['dataset']['rows']
     assert run['sample_count']==1
-    env={v['name']:v['value'] for v in job['spec']['template']['spec']['containers'][0]['env']}
+    env={v['name']:v['value'] for v in job['spec']['template']['spec']['containers'][0]['env'] if 'value' in v}
     assert json.loads(env['EVAL_CONTENT_POLICY'])['input']=='omit'
     wh={'Authorization':'Bearer '+env['EVAL_STORAGE_TOKEN'],'X-Project-ID':'p'}
     path='/api/v1/evaluations/run-input/'+run['experiment_id']

@@ -1,5 +1,6 @@
 """Trusted internal workload runner, using docker or kubectl without a shell."""
 from __future__ import annotations
+from evaluation_backend.observability import observed
 
 import argparse
 import hashlib
@@ -131,6 +132,7 @@ class Runner:
     def fingerprint(self, task):
         return hashlib.sha256((self.scope + task.digest).encode()).hexdigest()[:63]
 
+    @observed('workload.command')
     def run(self, args, stdin=None):
         c = self.config
         if c.mode == 'docker':
@@ -173,6 +175,7 @@ class Runner:
                                  'volumeMounts': [{'name': 'tmp', 'mountPath': '/tmp'}]}],
                              'volumes': [{'name': 'tmp', 'emptyDir': {'sizeLimit': '128Mi'}}]}}}}
 
+    @observed('workload.submit')
     def submit(self, task: Task):
         spec = json.dumps(asdict(task), sort_keys=True)
         with self.db() as db:
@@ -273,6 +276,7 @@ class Runner:
         else:
             self.run(['delete', 'job', task.name, '--ignore-not-found', '--cascade=foreground', '--wait=true', '--timeout=40s'])
 
+    @observed('workload.cancel', job_name='job_id')
     def cancel(self, job_id):
         current = self.status(job_id)
         if current.state in TERMINAL:
@@ -282,6 +286,7 @@ class Runner:
             db.execute('UPDATE jobs SET state=? WHERE id=? AND state NOT IN (?,?,?,?)', ('CANCELLING', job_id, *sorted(TERMINAL)))
         return self.status(job_id)
 
+    @observed('workload.cleanup', job_name='job_id')
     def cleanup(self, job_id):
         current = self.status(job_id)
         if current.state not in TERMINAL:
@@ -307,6 +312,7 @@ class Runner:
             return self.run(['container', 'logs', '--tail', str(tail), task.name])
         return self.run(['logs', 'job/' + task.name, '--all-containers=true', '--tail', str(tail)])
 
+    @observed('workload.wait', job_name='job_id')
     def wait(self, job_id):
         import time
         while True:
@@ -319,6 +325,8 @@ class Runner:
 
 
 def main():
+    from evaluation_backend.observability import configure_logging, event
+    configure_logging('evaluation-workload-runner')
     parser = argparse.ArgumentParser(description='Internal evaluation workload runner')
     parser.add_argument('action', choices=['submit', 'status', 'cancel', 'cleanup', 'logs', 'wait'])
     parser.add_argument('value', help='task JSON path for submit; task id otherwise')
@@ -333,7 +341,8 @@ def main():
         if args.action == 'wait' and result.state != 'SUCCEEDED':
             parser.exit(2)
     except (RunnerError, ValueError) as exc:
-        parser.exit(1, str(exc) + '\n')
+        event('workload.cli.failed', level='ERROR', error=exc)
+        parser.exit(1, 'Workload operation failed; see structured logs.\n')
 
 
 if __name__ == '__main__':

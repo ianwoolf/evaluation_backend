@@ -81,8 +81,11 @@ class ExperimentReporter(Protocol):
 
 
 def run_experiment(settings: Settings, source: DatasetSource, library: ScorerLibrary, reporter: ExperimentReporter, target: Callable) -> dict:
+    from evaluation_backend.observability import operation, event
     dataset = source.get_dataset(settings)
-    scorers = library.get_scorers(dataset, settings.scorer_ids)
+    with operation('scorer.library.load', run_id=settings.evaluation_id, dataset_id=settings.dataset_id):
+        scorers = library.get_scorers(dataset, settings.scorer_ids)
     if [x.id for x in scorers] != settings.scorer_ids:
         raise ValueError('scorer library returned unexpected scorers')
+    event('scorer.library.ready', run_id=settings.evaluation_id, count=len(scorers))
     return reporter.execute(settings, dataset, target, scorers)

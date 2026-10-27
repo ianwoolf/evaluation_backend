@@ -2,6 +2,6 @@
   "glm-dev": {
     "address": "https://open.bigmodel.cn/api/coding/paas/v4",
     "model": "glm-4.7",
-    "token": "REPLACE_WITH_PRIVATE_PROVIDER_TOKEN"
+    "token_env": "EVAL_MODEL_TOKEN_ABCDEF123456"
   }
 }
