@@ -12,7 +12,7 @@ import httpx
 
 from . import Conflict, NotFound, StorageError
 
-COLLECTIONS = {'datasets', 'traces', 'scores', 'experiments', 'samples', 'run-contexts', 'environments', 'target-configs'}
+COLLECTIONS = {'datasets', 'traces', 'scores', 'experiments', 'samples', 'run-contexts', 'environments', 'target-configs', 'targets'}
 
 
 class ElasticsearchStorage:
@@ -190,6 +190,8 @@ class ElasticsearchStorage:
     def decode(self, collection, hit):
         doc = dict(hit['_source'])
         rev = f"{hit['_seq_no']}:{hit['_primary_term']}"
+        if collection == 'targets':
+            return {**doc['spec'], 'id': doc['id'], '_revision': rev}
         if collection in ('datasets', 'environments', 'target-configs'):
             if collection == 'target-configs':
                 return {**doc['spec'], 'id': doc['id'], 'version': doc['version'], '_revision': rev}
@@ -247,7 +249,11 @@ class ElasticsearchStorage:
         index = self.index(collection)
         params = {'refresh': 'wait_for', **self.revision_params(revision)}
         doc = {**value, 'project_id': project, 'id': ident}
-        if collection in ('datasets', 'environments', 'target-configs'):
+        if collection == 'targets':
+            doc = {'project_id': project, 'record_type': 'target', 'id': ident, 'state': 'head',
+                   'version': value['version'], 'spec': value,
+                   'updated_at': datetime.now(timezone.utc).isoformat()}
+        elif collection in ('datasets', 'environments', 'target-configs'):
             kind = {'datasets': 'dataset', 'environments': 'environment', 'target-configs': 'target-config'}[collection]
             versions = value.get('versions', [])
             version = len(versions)
@@ -322,7 +328,9 @@ class ElasticsearchStorage:
 
     def search_records(self, collection, project, *, filters=None, offset=0, limit=100):
         terms = [{'term': {'project_id': project}}]
-        if collection in ('datasets', 'environments', 'target-configs'):
+        if collection == 'targets':
+            terms.extend([{'term': {'record_type': 'target'}}, {'term': {'state': 'head'}}])
+        elif collection in ('datasets', 'environments', 'target-configs'):
             kind = {'datasets': 'dataset', 'environments': 'environment', 'target-configs': 'target-config'}[collection]
             terms.extend([{'term': {'record_type': kind}}, {'term': {'state': 'head'}}])
         elif collection in ('experiments', 'run-contexts'):

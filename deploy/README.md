@@ -97,9 +97,8 @@ kubectl -n evaluation get pods,svc,pvc
 ```
 
 services.yaml 中：
-- EVAL_RESOURCE_BINDINGS 允许 guardrail-privacy / ds-guardrail v1 / env-isolated / glm-dev。
-  none 由所选 Environment 版本决定，可在同一 binding 下使用；修改业务 ID 时同步修改 binding。
-- 默认 target provider 为 nemo guardrail；自定义 target 用 EVAL_TARGETS JSON。
+- target 测评配置存储在 ES；校验 dataset/environment 版本及打分器，模型取自 environment（支持 none），无需静态绑定白名单。
+- target 目录从 ES 读取，通过 GET/POST /api/v1/evaluations/targets/{id} 管理，不再读取 EVAL_TARGETS；空库需先创建 target 或运行 seed_demo.py。
 - EVAL_CONTENT_POLICY 默认保留 input/response/reference；可分别改成 omit，对新运行生效。
 - 集群服务名默认 evaluation-api:8001 和 evaluation-es:9200，跨命名空间地址固定为 evaluation。
 - CPU/Memory 从 Environment 版本读取：1000m=1 core，1024Mi=1Gi，requests=limits。

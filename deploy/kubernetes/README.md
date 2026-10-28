@@ -19,7 +19,6 @@ UI 仓库的对应目录是 `web/deploy/kubernetes`。本目录命令在后端�
 | evaluation-storage | ConfigMap | 后端与 runner 共用的 ES 地址、records/samples/traces 索引名 |
 | evaluation-api-config | ConfigMap | API 普通参数、项目、执行方式、镜像、配置文件路径 |
 | evaluation-model-registry | ConfigMap | models.json，仅地址、模型名和 token_env 引用 |
-| evaluation-resource-bindings | ConfigMap | bindings.json，目标与资源绑定 |
 | evaluation-ui-runtime | ConfigMap（UI 仓库） | UI JSON 参数，无凭据 |
 | evaluation-credentials | Secret | 内部签名/解析 token、模型 token、可选 ES 密码/API key、OTel 认证头 |
 | evaluation-api / evaluation-worker | ServiceAccount；API 配 Role/RoleBinding | API 仅在 evaluation 内创建/读取 Job、读取 Pod/log；worker 不挂 API token |
@@ -37,8 +36,8 @@ API 和新 runner 使用统一 Secret，模型 JSON、绑定 JSON 和 UI JSON/Ng
 
 ## 部署顺序
 
-当前清单使用本地镜像 `evaluation-worker:deploy-v2`，需先执行
-`docker build -f Dockerfile.worker -t evaluation-worker:deploy-v2 .` 并导入 K8s 节点。
+当前清单使用本地镜像 `evaluation-worker:targets-db-20261028`，需先执行
+`docker build -f Dockerfile.worker -t evaluation-worker:targets-db-20261028 .` 并导入 K8s 节点。
 此标签尚未发布到 Docker Hub。已有数据升级前，按照
 [storage-service.md](../../docs/storage-service.md) 停止写入、迁移，再启动新版本。
 修改 `evaluation-storage` 后需要重启 API；新建 runner Job 自动加载新配置。
@@ -50,10 +49,10 @@ API 和新 runner 使用统一 Secret，模型 JSON、绑定 JSON 和 UI JSON/Ng
 5. 通过 API 导入 Dataset、创建 Environment、保存每个 target Config，再运行评测。
 
 ```bash
-docker build -f Dockerfile.worker -t evaluation-worker:deploy-v2 .
+docker build -f Dockerfile.worker -t evaluation-worker:targets-db-20261028 .
 # ES 使用与现有磁盘一致的版本；本地无镜像时才从官方仓库拉取。
 docker pull docker.io/library/elasticsearch:8.19.23
-bash deploy/kubernetes/import-local-image.sh evaluation-worker:deploy-v2 docker.io/library/elasticsearch:8.19.23
+bash deploy/kubernetes/import-local-image.sh evaluation-worker:targets-db-20261028 docker.io/library/elasticsearch:8.19.23
 kubectl --context docker-desktop create namespace evaluation --dry-run=client -o yaml | kubectl --context docker-desktop apply -f -
 PYTHONPATH=src python3 deploy/kubernetes/render_secrets.py --config .env | kubectl --context docker-desktop apply -f -
 kubectl --context docker-desktop apply -f deploy/kubernetes/elasticsearch.yaml
@@ -65,16 +64,19 @@ kubectl --context docker-desktop -n evaluation rollout status deployment/evaluat
 
 Secret 渲染要求本地忽略的配置文件提供 `EVAL_MODEL_REGISTRY`（models.json 路径）、
 `EVAL_MODEL_RESOLVER_TOKEN`、`EVAL_TRIGGER_TOKEN`。现有集群已有正确 Secret 时无需重建。
-stdout 含凭据，只管道给 kubectl，不保存到仓库、不回显。脚本同时生成模型和绑定 ConfigMap，
+stdout 含凭据，只管道给 kubectl，不保存到仓库、不回显。脚本同时生成模型 ConfigMap，
 以及统一的 evaluation-credentials Secret；UI 无需 Secret。
-evaluation-resource-bindings ConfigMap 的 bindings.json 定义允许执行的 target/dataset/environment/model
-组合；换 ID 时同步修改。可选 `EVAL_TARGETS` 定义服务端 target 目录。
+测评配置保存在 ES 的 target-configs 记录中；保存和执行时校验 dataset/environment 的指定版本及打分器。
+模型取自 environment，支持 `none`。不再需要 bindings.json 或绑定 ConfigMap。
+target 目录保存在 ES 的 evaluation-records-v2（record_type=target），通过 targets API 管理，不再读取 EVAL_TARGETS。
+从旧版本升级时同时更新 API/UI 镜像和 services.yaml。API 滚动更新完成后，
+旧 evaluation-resource-bindings ConfigMap 可删除；已有 ES target 配置无需迁移。
 
 `import-local-image.sh` 支持 macOS/Linux/WSL 的 Docker Desktop kind 单节点。使用已有
 `kindest/node:v1.36.1` 临时 privileged helper 导入隐藏节点 containerd，不推送仓库。
 其他节点版本通过 `KIND_NODE_IMAGE` 指定已有镜像；标准 kind 集群可设置
 `KIND_CLUSTER_NAME` 使用 `kind load docker-image`。生产环境改用可访问仓库及不可变 tag/digest。
-API image 与 `EVAL_WORKER_IMAGE` 必须一致。当前应用镜像为本地 deploy-v2 标签，需自行构建/导入或推送到自己的仓库。
+API image 与 `EVAL_WORKER_IMAGE` 必须一致。当前应用镜像为本地 targets-db-20261028 标签，需自行构建/导入或推送到自己的仓库。
 
 ## 初始化业务数据与配置
 

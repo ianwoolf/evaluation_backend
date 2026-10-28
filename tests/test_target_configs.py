@@ -39,7 +39,7 @@ def test_stale_trigger_and_invalid_config_do_not_launch(setup):
     config['revision']=saved['revision'];c.post(path,json=config,headers=h)
     assert c.post('/api/v1/evaluations/targets/g/runs',json={'config_revision':saved['revision']},headers=h).status_code==409
     config['dataset_id']='missing'
-    assert c.post(path,json=config,headers=h).status_code==422
+    assert c.post(path,json=config,headers=h).status_code==404
     assert k.created==0
 
 
@@ -72,3 +72,51 @@ def test_sample_trace_retains_zero_model_latency_without_model_step(setup):
     assert len(traces)==1
     assert traces[0]['data']['modelLatencyMs']==0
     assert [step['kind'] for step in traces[0]['data']['trace']]==['SCORER']
+
+
+def test_new_stored_resources_can_save_and_trigger_without_bindings(setup):
+    import copy
+    from evaluation_backend.storage.service import get_service
+    from test_uploads import SCHEMA
+    c,k,b,h=setup
+    service=c.app.dependency_overrides[get_service]()
+    version={**copy.deepcopy(SCHEMA), 'version':2}
+    service.storage.put('datasets','p','new-dataset',{'id':'new-dataset','versions':[version]})
+    service.storage.put('environments','p','new-environment',{'id':'new-environment','versions':[
+        {'name':'New environment','version':3,'cpuMillicores':500,'memoryMiB':512,
+         'modelId':'custom-model','guardrailId':'g'}]})
+    config={'dataset_id':'new-dataset','dataset_version':2,'environment_id':'new-environment',
+            'environment_version':3,'scorer_ids':['mock-score'],'scoring_mode':'mock'}
+    response=c.post('/api/v1/evaluations/targets/g/config',json=config,headers=h)
+    assert response.status_code==200,response.text
+    assert response.json()['model_id']=='custom-model'
+    run=c.post('/api/v1/evaluations/targets/g/runs',
+               json={'config_revision':response.json()['revision']},headers=h)
+    assert run.status_code==200,run.text
+    assert run.json()['model_id']=='custom-model'
+    assert k.created==1
+
+
+def test_invalid_resources_and_scorers_never_save_or_launch(setup):
+    c,k,b,h=setup
+    config={'dataset_id':'d','dataset_version':1,'environment_id':'e','environment_version':1,
+            'scorer_ids':['mock-score'],'scoring_mode':'mock'}
+    for patch,status in [({'dataset_id':'missing'},404),({'dataset_version':99},404),
+                         ({'environment_id':'missing'},404),({'environment_version':99},404),
+                         ({'scorer_ids':['missing'],'scoring_mode':'installed'},422)]:
+        response=c.post('/api/v1/evaluations/targets/g/config',json={**config,**patch},headers=h)
+        assert response.status_code==status,response.text
+    assert c.post('/api/v1/evaluations/targets/missing/config',json=config,headers=h).status_code==404
+    for patch,status in [({'dataset_id':'missing'},404),({'dataset_version':99},404),
+                         ({'environment_id':'missing'},404),({'environment_version':99},404),
+                         ({'target_id':'missing'},404)]:
+        response=c.post('/api/v1/evaluations/runs',json={**b,**patch},headers=h)
+        assert response.status_code==status,response.text
+    assert k.created==0
+
+
+def test_runtime_configuration_has_no_bindings_dependency(setup):
+    c,k,b,h=setup
+    response=c.get('/api/v1/evaluations/config',headers=h)
+    assert response.status_code==200
+    assert 'bindings' not in response.json()

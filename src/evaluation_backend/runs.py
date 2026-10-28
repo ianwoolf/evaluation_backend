@@ -52,16 +52,6 @@ class StartRun(BaseModel):
     upload_id: str | None = Field(default=None, pattern=r"^upload-[a-f0-9]{32}$")
 
 
-def bindings():
-    # Only server-owned bindings may choose real resources; never accept Pod specs.
-    value = os.getenv('EVAL_RESOURCE_BINDINGS', '')
-    if not value and os.getenv('EVAL_RESOURCE_BINDINGS_FILE'):
-        value = Path(os.environ['EVAL_RESOURCE_BINDINGS_FILE']).read_text()
-    if not value:
-        raise HTTPException(503, 'Evaluation resource bindings are not configured')
-    return json.loads(value)
-
-
 class Kubernetes:
     def __init__(self):
         root = Path('/var/run/secrets/kubernetes.io/serviceaccount')
@@ -152,16 +142,9 @@ def summary(job, cluster, service=None, project=None):
             'error': error, 'phase': status if status != 'RUNNING' else 'RUNNING' if job.get('status', {}).get('active') else 'QUEUED'}
 
 
-@router.get('/targets', dependencies=[Depends(authorize)])
-def target_catalog():
-    from evaluation_backend.targets import targets
-    values = targets()
-    return {'items': values, 'total': len(values)}
-
-
 @router.get('/config', dependencies=[Depends(authorize)])
 def configuration():
-    return {'runtime': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'bindings': bindings(), 'scoring_modes': ['mock', 'installed'],
+    return {'runtime': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'scoring_modes': ['mock', 'installed'],
             'target_mode': 'llm', 'scorer_ids': ['mock-score', 'sc-risk']}
 
 
@@ -169,11 +152,6 @@ def configuration():
 @observed('evaluation.trigger', project_id='x_project_id')
 def start(request: StartRun, x_project_id: str = Header(min_length=1),
           idempotency_key: str = Header(min_length=16, max_length=128), cluster=Depends(kube), service=Depends(get_service)):
-    binding = next((b for b in bindings() if b['target_id'] == request.target_id
-                    and b['dataset_id'] == request.dataset_id and b['dataset_version'] == request.dataset_version
-                    and b['environment_id'] == request.environment_id and request.model_id in ('none', b['model_id'])), None)
-    if not binding:
-        raise HTTPException(422, 'Selected target, dataset version, environment or model has no backend binding')
     # Idempotency is checked before touching temporary content (which may already be deleted).
     digest = hashlib.sha256(json.dumps(request.model_dump(), sort_keys=True).encode()).hexdigest()
     name = 'eval-' + hashlib.sha256((x_project_id + ':' + idempotency_key).encode()).hexdigest()[:24]
@@ -190,15 +168,14 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         event('evaluation.trigger.reused', run_id=experiment, job_name=name)
         return summary(previous, cluster, service, x_project_id)
     from evaluation_backend.environments import environment_version
-    from evaluation_backend.targets import targets
+    from evaluation_backend.targets import get_target
     environment = environment_version(service, x_project_id, request.environment_id, request.environment_version)
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
     if request.resources is not None and request.resources != resources:
         raise HTTPException(422, 'Resources must match the stored environment version')
-    target = next((t for t in targets() if t['id'] == request.target_id), None)
-    if target is None: raise HTTPException(422, 'Target is not configured')
+    target = get_target(service, x_project_id, request.target_id)
     version = service.dataset_version(x_project_id, request.dataset_id, request.dataset_version)
     if request.scoring_mode == 'mock':
         if request.scorer_ids != ['mock-score']: raise HTTPException(422, 'Mock mode requires only mock-score')

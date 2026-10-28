@@ -57,8 +57,6 @@ services:
         target: /config/backend.env
       - source: models
         target: /config/models.json
-      - source: bindings
-        target: /config/bindings.json
     secrets: [trigger_token, resolver_token, model_tokens, es_password, es_api_key, otel_headers]
     group_add: ['${DOCKER_GID:-0}']
     volumes:
@@ -83,7 +81,6 @@ services:
 configs:
   backend_settings: {file: ./config/backend.env}
   models: {file: ./config/models.json}
-  bindings: {file: ./config/bindings.json}
 secrets:
   trigger_token: {file: ./.secrets/trigger_token}
   resolver_token: {file: ./.secrets/resolver_token}

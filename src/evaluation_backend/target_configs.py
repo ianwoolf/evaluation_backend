@@ -3,9 +3,9 @@ from evaluation_backend.observability import observed
 from typing import Literal
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from evaluation_backend.runs import authorize, bindings, start, StartRun, kube
+from evaluation_backend.runs import authorize, start, StartRun, kube
 from evaluation_backend.environments import environment_version
-from evaluation_backend.targets import targets
+from evaluation_backend.targets import get_target
 from evaluation_backend.storage import NotFound, Conflict
 from evaluation_backend.storage.service import get_service, public, now
 
@@ -25,14 +25,9 @@ class TargetConfig(BaseModel):
 
 
 def selection(project, ident, value, service):
-    if not any(t['id']==ident for t in targets()): raise HTTPException(404,'Target not found')
-    binding=next((b for b in bindings() if b['target_id']==ident and b['dataset_id']==value.dataset_id and b['dataset_version']==value.dataset_version and b['environment_id']==value.environment_id),None)
-    if not binding: raise HTTPException(422,'Selected target, dataset or environment has no backend binding')
+    get_target(service, project, ident)
     dataset=service.dataset_version(project,value.dataset_id,value.dataset_version)
     environment = environment_version(service,project,value.environment_id,value.environment_version)
-    if environment['modelId'] not in ('none', binding['model_id']):
-        raise HTTPException(422, 'Environment model has no backend binding')
-    binding = {**binding, 'model_id': environment['modelId']}
     if value.scoring_mode=='mock':
         if value.scorer_ids!=['mock-score']:raise HTTPException(422,'Mock mode requires only mock-score')
     else:
@@ -43,7 +38,7 @@ def selection(project, ident, value, service):
             if dataset.get('scorerIds') and any(s not in dataset['scorerIds'] for s in value.scorer_ids):raise ValueError('Scorer is not enabled for this dataset version')
             InstalledScorerLibrary().get_scorers(Dataset(value.dataset_id,dataset['name'],dataset['metadata']),value.scorer_ids)
         except ValueError as e:raise HTTPException(422,str(e)) from None
-    return binding
+    return environment
 
 
 @router.get('/targets/{ident}/config')
@@ -54,11 +49,11 @@ def get_config(ident:str,x_project_id:str=Header(min_length=1),service=Depends(g
 @router.post('/targets/{ident}/config')
 @observed('target_config.save', project_id='x_project_id', target_id='ident')
 def save_config(ident:str,value:TargetConfig,x_project_id:str=Header(min_length=1),service=Depends(get_service)):
-    binding=selection(x_project_id,ident,value,service)
+    environment=selection(x_project_id,ident,value,service)
     try:current=service.storage.get('target-configs',x_project_id,ident)
     except NotFound:current=None
     if (current and current['_revision']!=value.revision) or (not current and value.revision is not None):raise Conflict('Target config changed; reload before saving')
-    record={**value.model_dump(exclude={'revision'}),'id':ident,'model_id':binding['model_id'],'updated_at':now()}
+    record={**value.model_dump(exclude={'revision'}),'id':ident,'model_id':environment['modelId'],'updated_at':now()}
     return public(service.storage.put('target-configs',x_project_id,ident,record,create=current is None,revision=value.revision))
 
 

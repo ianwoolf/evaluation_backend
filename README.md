@@ -48,8 +48,30 @@ runner 内部签名与模型解析凭据保留在服务端，不提供给浏览�
 | --- | --- |
 | `dataset` | `spec` 中保存名称、目标、字段 schema、rows、metadata 和可用评分器 `scorerIds` |
 | `environment` | `spec` 中保存模型/Guardrail 配置、runner、CPU、内存、超时和执行限制 |
+| `target` | `spec` 中保存 id、name、kind、provider、version、definition；state=head，复用资源索引 |
 | `target-config` | `spec` 中保存 dataset/environment 的 ID 和版本、scorer IDs、评分模式、published/upload 数据来源 |
 | `run` | 保存本次测评的资源引用、固定执行配置、状态、进度和最终评分汇总 |
+
+Target 目录不再读取 `EVAL_TARGETS`，也没有运行时默认列表。UI 继续调用
+`GET /api/v1/evaluations/targets`（支持 offset/limit），数据按项目从存储读取。
+`GET /api/v1/evaluations/targets/{id}` 读取详情和 revision；
+`POST /api/v1/evaluations/targets/{id}` 新增或更新，例如：
+
+```json
+{
+  "id": "guardrail-privacy",
+  "name": "Privacy & prompt injection",
+  "kind": "GUARDRAIL",
+  "provider": "nemo guardrail",
+  "version": 2,
+  "definition": "Block private-data requests and instruction override attempts."
+}
+```
+
+更新需携带读取到的 `revision` 并增加 `version`；已有测评保留启动时的 target 快照。
+升级时先通过上述接口导入旧 target（保持原 ID），或显式执行
+`deploy/docker-compose/seed_demo.py` 初始化演示资源；不会覆盖已有资源。
+Target 定义与 target-config 测评选择分别存储，不新增 ES 索引。
 
 资源版本使用 `state: published`、`version`、`spec`；另有一条 `state: head` 文档通过
 `version_keys` 指向已提交的版本。Dataset head 的 `spec` 是草稿，Environment head 的

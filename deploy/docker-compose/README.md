@@ -10,9 +10,13 @@ API 将评测启动为独立 Docker 容器，内部仍包含 worker、collector 
 | --- | --- | --- |
 | API 参数、ES 地址/索引/证书开关 | config/backend.env（configs） | ConfigMap |
 | 模型地址/模型名/token_env 引用 | config/models.json（configs） | evaluation-model-registry ConfigMap |
-| target/dataset/environment 绑定 | config/bindings.json（configs） | evaluation-resource-bindings ConfigMap |
+| target 测评配置 | ES 中的 target-configs 记录 | ES 中的 target-configs 记录 |
 | UI 参数、Nginx 上游 | UI 仓库 deploy/docker-compose/config（configs） | UI ConfigMap / 镜像配置 |
 | 内部签名、模型解析 token、模型 token、ES 密码/API key、OTel 认证头 | .secrets 文件（secrets） | evaluation-credentials Secret |
+
+target 配置直接引用存储中的 dataset/environment 版本，并校验打分器；模型取自 environment，
+支持 `none`。不再读取 bindings.json 或 EVAL_RESOURCE_BINDINGS；新增资源无需更新部署文件。
+从旧版本升级时需同时更新 API/UI 镜像并使用本目录的新 Compose 配置，已有 ES target 配置可继续使用。
 
 `models.json` 不放 token，例如：
 

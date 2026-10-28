@@ -39,8 +39,6 @@ class Cluster:
 def setup(monkeypatch):
     binding = {'target_id': 'g', 'dataset_id': 'd', 'dataset_version': 1, 'environment_id': 'e', 'model_id': 'glm-dev', 'langfuse_dataset_id': 'real-d', 'langfuse_dataset_version': '2026-10-19T12:00:00Z'}
     monkeypatch.setenv('EVAL_TRIGGER_TOKEN', 'secret')
-    monkeypatch.setenv('EVAL_TARGETS', json.dumps([{'id':'g','name':'Guardrail','provider':'nemo guardrail','version':2}]))
-    monkeypatch.setenv('EVAL_RESOURCE_BINDINGS', json.dumps([binding]))
     monkeypatch.setenv('EVAL_WORKER_IMAGE', 'ianwoolf/evaluation-worker:test')
     monkeypatch.setenv('EVAL_PUBLIC_LANGFUSE_URL', 'http://localhost:3000')
     cluster = Cluster()
@@ -48,6 +46,7 @@ def setup(monkeypatch):
     memory = Memory()
     memory.put("datasets", "p", "d", {"versions": [SCHEMA]})
     memory.put('environments','p','e',{'id':'e','versions':[{'name':'Isolated','version':1,'cpuMillicores':750,'memoryMiB':768,'modelId':'glm-dev','guardrailId':'g'}]})
+    memory.put('targets','p','g',{'id':'g','name':'Guardrail','kind':'GUARDRAIL','provider':'nemo guardrail','version':2,'definition':''})
     app.dependency_overrides[get_service] = lambda: EvaluationStorageService(memory)
     app.dependency_overrides[kube] = lambda: cluster
     body = {'name': 'Test', **{k: v for k, v in binding.items() if not k.startswith('langfuse')}, 'scoring_mode': 'mock', 'scorer_ids': ['mock-score'], 'snapshot': {}}
@@ -55,7 +54,7 @@ def setup(monkeypatch):
     return TestClient(app), cluster, body, headers
 
 
-def test_auth_and_binding_validation(setup):
+def test_auth_and_environment_model_validation(setup):
     client, cluster, body, headers = setup
     assert client.post('/api/v1/evaluations/runs', json=body).status_code == 401
     body['model_id'] = 'arbitrary'

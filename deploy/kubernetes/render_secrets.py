@@ -27,13 +27,7 @@ credentials={'EVAL_TRIGGER_TOKEN':os.environ['EVAL_TRIGGER_TOKEN'],
              'EVAL_MODEL_RESOLVER_TOKEN':os.environ['EVAL_MODEL_RESOLVER_TOKEN'],**tokens}
 for key in ('EVAL_ES_PASSWORD','EVAL_ES_API_KEY','OTEL_EXPORTER_OTLP_LOGS_HEADERS'):
     if os.getenv(key):credentials[key]=os.environ[key]
-bindings=os.getenv('EVAL_RESOURCE_BINDINGS','')
-if not bindings and os.getenv('EVAL_RESOURCE_BINDINGS_FILE'):
-    bindings=Path(os.environ['EVAL_RESOURCE_BINDINGS_FILE']).read_text()
-if not bindings:bindings=json.dumps([{'target_id':'guardrail-privacy','dataset_id':'ds-guardrail','dataset_version':1,'environment_id':'env-isolated','model_id':'glm-dev'}])
-json.loads(bindings)
 items=[{'apiVersion':'v1','kind':'ConfigMap','metadata':{'name':'evaluation-model-registry','namespace':args.namespace},
         'data':{'models.json':json.dumps(models)}},
-       {'apiVersion':'v1','kind':'ConfigMap','metadata':{'name':'evaluation-resource-bindings','namespace':args.namespace},
-        'data':{'bindings.json':bindings}},secret('evaluation-credentials',credentials)]
+       secret('evaluation-credentials',credentials)]
 print(yaml.safe_dump_all(items,sort_keys=False),end='')

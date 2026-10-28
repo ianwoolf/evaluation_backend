@@ -14,14 +14,13 @@ from memory_storage import Memory
 @pytest.fixture
 def live(monkeypatch,tmp_path):
     monkeypatch.setenv('EVAL_TRIGGER_TOKEN','secret')
-    monkeypatch.setenv('EVAL_TARGETS', json.dumps([{'id':'g','name':'Guardrail','provider':'nemo guardrail','version':2}]))
     monkeypatch.setenv('EVAL_WORKER_IMAGE','worker:test')
     monkeypatch.setenv('EVAL_UPLOAD_DIR',str(tmp_path))
     monkeypatch.setenv('EVAL_CONTENT_POLICY','{"input":"omit","response":"omit","reference":"omit"}')
     binding={'target_id':'g','dataset_id':'d','dataset_version':1,'environment_id':'e','model_id':'m'}
-    monkeypatch.setenv('EVAL_RESOURCE_BINDINGS',json.dumps([binding]))
     mem=Memory();mem.put('datasets','p','d',{'id':'d','versions':[SCHEMA]})
     mem.put('environments','p','e',{'id':'e','versions':[{'name':'Isolated','version':1,'cpuMillicores':750,'memoryMiB':768,'modelId':'m','guardrailId':'g'}]})
+    mem.put('targets','p','g',{'id':'g','name':'Guardrail','kind':'GUARDRAIL','provider':'nemo guardrail','version':2,'definition':''})
     app=create_app();service=EvaluationStorageService(mem);cluster=Cluster()
     app.dependency_overrides[get_service]=lambda:service
     app.dependency_overrides[kube]=lambda:cluster

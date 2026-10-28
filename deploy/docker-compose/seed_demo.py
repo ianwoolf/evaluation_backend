@@ -15,6 +15,9 @@ def ensure(path, value):
         request=urllib.request.Request(base+path,headers=headers,data=json.dumps(value).encode())
         urllib.request.urlopen(request,timeout=30).close()
         print(path+': created')
+ensure('targets/guardrail-privacy',{'id':'guardrail-privacy','name':'Privacy & prompt injection',
+    'kind':'GUARDRAIL','provider':'nemo guardrail','version':2,
+    'definition':'Block private-data requests and instruction override attempts.'})
 content={'name':'Guardrail conversation safety','objective':'Validate the deployment with synthetic samples.',
          'description':'Synthetic none/mock deployment data.','tags':['deployment-demo'],'scorerIds':['mock-score'],
          'metadata':{},'fields':[{'name':'messages','type':'json','role':'input','required':True},

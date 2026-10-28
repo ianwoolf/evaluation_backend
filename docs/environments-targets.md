@@ -25,14 +25,24 @@ CPU is an integer 1–32000 millicpu (`1000m = 1 CPU core`). Memory is an intege
 New run requests pin `environment_id` and `environment_version`; resource values
 come from that saved version. Legacy `resources` input is accepted only when it
 matches the database. Existing run snapshots remain unchanged after an edit.
-Other sandbox settings remain previews; trusted server resource bindings still
-control which model/target/dataset/environment combinations can execute.
+Other sandbox settings remain previews. Runs validate the server-owned target catalog,
+stored dataset/environment versions and scorer compatibility without a static bindings whitelist.
+The pinned environment selects the model, including `none` to skip model invocation.
 
-`GET /targets` supplies the server-owned Guardrail catalog. The current target is
-`guardrail-privacy`, provider `nemo guardrail`. Provider values are `f5` and
-`nemo guardrail`; the UI shows a Provider column and filter. Operators may replace
-the catalog using JSON array `EVAL_TARGETS` with validated id, name, kind,
-provider, version and definition fields. This does not install provider adapters.
+`GET /targets` reads the project-scoped target catalog from storage (ES
+`evaluation-records-v2`, `record_type=target`, `state=head`). No EVAL_TARGETS or
+hardcoded runtime fallback is used. An empty project returns an empty list.
+`GET /targets/{id}` returns one target and its revision. `POST /targets/{id}`
+creates/updates id, name, kind (GUARDRAIL), provider (f5 / nemo guardrail), version
+and definition. Updates require the current revision and an increased version.
+The catalog is distinct from target-configs (dataset/environment/scorer selection).
+Creating catalog metadata does not install provider adapters.
+
+For upgrades, import the old target definitions through POST before triggering runs;
+keep the same target IDs so existing target-configs remain usable. The explicit
+`deploy/docker-compose/seed_demo.py` initializer creates the demo target if missing
+and does not overwrite existing targets. It can also run inside the K8s API container.
+Existing run snapshots/history are not changed by catalog updates.
 
 At launch the backend fixes the target snapshot in the run context and passes
 `EVAL_TARGET_SNAPSHOT` to the runner. Startup prints one structured stdout line:
@@ -56,9 +66,9 @@ metadata is separately available in ES traces, not transported as an OTel log.
 ## Reusable target Config and Trigger
 
 `GET/POST /targets/{id}/config` reads/saves a project-scoped target Config in ES
-`evaluation-target-configs-v1`. Save fields: dataset_id, dataset_version,
+`evaluation-records-v2` (target-configs records). Save fields: dataset_id, dataset_version,
 environment_id, environment_version, data_source (published/upload), scoring_mode,
-scorer_ids, and revision when updating. The backend verifies bindings and schema
+scorer_ids, and revision when updating. The backend verifies resource existence and schema
 versions and derives model_id. Config never stores upload_id or sample content.
 
 `POST /targets/{id}/runs` takes config_revision, optional name and (upload mode
