@@ -36,6 +36,13 @@ async def authorize(request: Request, authorization: str = Header(default='')):
     await worker_boundary(request, claims)
 
 
+class DatasetSelection(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    dataset_id: str = Field(min_length=1, max_length=128)
+    dataset_version: int = Field(ge=1, strict=True)
+    upload_id: str | None = Field(default=None, pattern=r'^upload-[a-f0-9]{32}$')
+
+
 class StartRun(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str = Field(default="", max_length=200)
@@ -50,6 +57,7 @@ class StartRun(BaseModel):
     snapshot: dict
     resources: PodResources | None = None
     upload_id: str | None = Field(default=None, pattern=r"^upload-[a-f0-9]{32}$")
+    datasets: list[DatasetSelection] | None = Field(default=None, min_length=1, max_length=20)
 
 
 class Kubernetes:
@@ -152,6 +160,8 @@ def configuration():
 @observed('evaluation.trigger', project_id='x_project_id')
 def start(request: StartRun, x_project_id: str = Header(min_length=1),
           idempotency_key: str = Header(min_length=16, max_length=128), cluster=Depends(kube), service=Depends(get_service)):
+    if request.datasets is not None and request.upload_id:
+        raise HTTPException(422, 'Specify uploads per dataset')
     # Idempotency is checked before touching temporary content (which may already be deleted).
     digest = hashlib.sha256(json.dumps(request.model_dump(), sort_keys=True).encode()).hexdigest()
     name = 'eval-' + hashlib.sha256((x_project_id + ':' + idempotency_key).encode()).hexdigest()[:24]
@@ -176,7 +186,14 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     if request.resources is not None and request.resources != resources:
         raise HTTPException(422, 'Resources must match the stored environment version')
     target = get_target(service, x_project_id, request.target_id)
-    version = service.dataset_version(x_project_id, request.dataset_id, request.dataset_version)
+    selections = request.datasets or [DatasetSelection(dataset_id=request.dataset_id,
+        dataset_version=request.dataset_version, upload_id=request.upload_id)]
+    if len({s.dataset_id for s in selections}) != len(selections):
+        raise HTTPException(422, 'Select each dataset only once')
+    if (selections[0].dataset_id, selections[0].dataset_version) != (request.dataset_id, request.dataset_version):
+        raise HTTPException(422, 'Primary dataset must match the first selection')
+    versions = [service.dataset_version(x_project_id, s.dataset_id, s.dataset_version) for s in selections]
+    version = versions[0]
     if request.scoring_mode == 'mock':
         if request.scorer_ids != ['mock-score']: raise HTTPException(422, 'Mock mode requires only mock-score')
     else:
@@ -184,14 +201,23 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         from evaluation_backend.scorers import InstalledScorerLibrary
         try:
             if not request.scorer_ids or len(request.scorer_ids) != len(set(request.scorer_ids)): raise ValueError('Scorers must be nonempty and unique')
-            allowed = version.get('scorerIds', [])
-            if allowed and any(s not in allowed for s in request.scorer_ids): raise ValueError('Scorer is not enabled for this dataset version')
-            InstalledScorerLibrary().get_scorers(Dataset(request.dataset_id, version['name'], version['metadata']), request.scorer_ids)
+            for selected, content in zip(selections, versions):
+                allowed = content.get('scorerIds', [])
+                if allowed and any(s not in allowed for s in request.scorer_ids): raise ValueError('Scorer is not enabled for dataset ' + selected.dataset_id)
+                InstalledScorerLibrary().get_scorers(Dataset(selected.dataset_id, content['name'], content['metadata']), request.scorer_ids)
         except ValueError as error: raise HTTPException(422, str(error)) from None
-    count = len(version['rows'])
-    if request.upload_id:
-        try: count = get_upload_store().claim(x_project_id, request.upload_id, request.dataset_id, request.dataset_version, name, experiment)
-        except UploadError as error: raise HTTPException(422, str(error)) from None
+    dataset_records = []
+    for selected, content in zip(selections, versions):
+        size = len(content['rows'])
+        if selected.upload_id:
+            try: size = get_upload_store().claim(x_project_id, selected.upload_id, selected.dataset_id, selected.dataset_version, name, experiment)
+            except UploadError as error: raise HTTPException(422, str(error)) from None
+        if request.datasets is not None and not size:
+            raise HTTPException(422, 'Dataset has no samples: ' + selected.dataset_id)
+        dataset_records.append({**selected.model_dump(), 'name': content['name'], 'sample_count': size})
+    count = sum(d['sample_count'] for d in dataset_records)
+    if (request.datasets is not None and not count) or count > 10000:
+        raise HTTPException(422, 'An evaluation requires 1 to 10,000 samples across all datasets')
     context = {'id': experiment, 'target': target, 'environment': environment, 'dataset_id': request.dataset_id, 'dataset_version': request.dataset_version,
                'upload_id': request.upload_id, 'content_policy': ContentPolicy.from_env().model_dump(), 'request_hash': digest}
     from zoneinfo import ZoneInfo
@@ -201,6 +227,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
                    environment_version=request.environment_version, scorer_ids=request.scorer_ids,
                    scoring_mode=request.scoring_mode, total_samples=count,
                    created_at=datetime.now(timezone.utc).isoformat())
+    if request.datasets is not None:
+        context['datasets'] = dataset_records
     try: service.storage.put('run-contexts', x_project_id, experiment, context, create=True)
     except Conflict:
         context = service.storage.get('run-contexts', x_project_id, experiment)
@@ -219,6 +247,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     snapshot['dataset'].update(rows=[], objective='', description='', tags=[], metadata={}, scorerIds=[])
     record = {k: v for k,v in request.model_dump().items() if k not in ('snapshot', 'upload_id')}
     record.update(name=context.get('name', request.name.strip() or generated_name), snapshot=snapshot, sample_count=count, resources=resources.model_dump())
+    record['datasets'] = [{k: v for k, v in d.items() if k != 'upload_id'} for d in dataset_records]
     job = build_job(request.dataset_id, request.model_id, request.scorer_ids,
                     namespace=cluster.namespace, image=os.environ['EVAL_WORKER_IMAGE'], mock=request.scoring_mode == 'mock', experiment_id=experiment, resources=resources)
     job['metadata']['name'] = name

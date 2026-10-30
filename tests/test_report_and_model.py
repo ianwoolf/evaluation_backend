@@ -18,6 +18,9 @@ def test_report_reads_project_scoped_partial_samples():
             return {'status': 'RUNNING'}
     class Service:
         storage = Store()
+        def dataset_summary(self, project, ident, experiment):
+            assert (project, ident, experiment['status']) == ('p', 'exp-1', 'RUNNING')
+            return []
         def page(self, collection, project, **kwargs):
             assert collection == 'samples' and project == 'p'
             assert kwargs['filters'] == {'evaluation_id': 'exp-1'}

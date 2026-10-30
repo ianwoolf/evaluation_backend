@@ -1,6 +1,7 @@
 """Platform-independent target/scorer execution with per-sample durable feedback."""
 from evaluation_backend.observability import observed
 from copy import deepcopy
+from dataclasses import replace
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,54 @@ class StoredExperiment:
         self.client = client or StorageClient()
         self.version = int(version or os.environ.get('EVAL_DATASET_VERSION', '1'))
         self.content = None
+        self.sample_prefix = ''
+        self.persist_summary = True
+
+    def run(self, settings, library, target):
+        """One run, pinned datasets, isolated sample IDs and one final summary."""
+        run_input = os.getenv('EVAL_RUN_INPUT_ID')
+        payload = self.client.run_input(run_input) if run_input else self.client.version(settings.dataset_id, self.version)
+        contents = payload.get('datasets')
+        if contents is None:
+            self.content = payload
+            if not payload['rows']: raise ValueError('Dataset has no published records')
+            dataset = Dataset(settings.dataset_id, payload['name'], payload['metadata'])
+            scorers = library.get_scorers(dataset, settings.scorer_ids)
+            if [s.id for s in scorers] != settings.scorer_ids: raise ValueError('Scorer library returned unexpected scorers')
+            return self.execute(settings, dataset, target, scorers)
+        summary = {'dataset_id': settings.dataset_id, 'dataset_version': self.version,
+                   'items': 0, 'errors': 0, 'status': 'RUNNING', 'dataset_results': [
+                       {'dataset_id': c['dataset_id'], 'dataset_version': c['version'], 'name': c['name'],
+                        'sample_count': len(c['rows']), 'items': 0, 'errors': 0, 'status': 'QUEUED'} for c in contents]}
+        self.persist_summary = False
+        self.client.experiment(settings.evaluation_id, summary)
+        for index, content in enumerate(contents):
+            self.content, self.version = content, content['version']
+            self.sample_prefix = f'dataset-{index:03d}-'
+            selected = replace(settings, dataset_id=content['dataset_id'])
+            dataset = Dataset(selected.dataset_id, content['name'], content['metadata'])
+            progress = summary['dataset_results'][index]
+            progress['status'] = 'RUNNING'
+            self.client.experiment(settings.evaluation_id, summary)
+            event('dataset.evaluation.started', run_id=settings.evaluation_id, dataset_id=dataset.id)
+            try:
+                if not content['rows']: raise ValueError('Dataset has no published records')
+                scorers = library.get_scorers(dataset, settings.scorer_ids)
+                if [s.id for s in scorers] != settings.scorer_ids:
+                    raise ValueError('Scorer library returned unexpected scorers')
+                result = self.execute(selected, dataset, target, scorers)
+                progress.update({k: result[k] for k in ('status', 'items', 'errors')})
+            except Exception as error:
+                event('dataset.evaluation.failed', level='ERROR', error=error, run_id=settings.evaluation_id, dataset_id=dataset.id)
+                progress.update(status='FAILED', errors=progress['errors'] + 1)
+            event('dataset.evaluation.completed', run_id=settings.evaluation_id, dataset_id=dataset.id,
+                  status=progress['status'], count=progress['items'])
+            summary['items'] += progress['items']
+            summary['errors'] += progress['errors']
+            self.client.experiment(settings.evaluation_id, summary)
+        summary['status'] = 'FAILED' if summary['errors'] else 'COMPLETED'
+        self.client.experiment(settings.evaluation_id, summary)
+        return {**summary, 'evaluation_id': settings.evaluation_id}
 
     @observed('dataset.load')
     def get_dataset(self, settings):
@@ -30,7 +79,7 @@ class StoredExperiment:
     def execute(self, settings, dataset, target, scorers):
         content = self.content
         summary = {'dataset_id': dataset.id, 'dataset_version': self.version, 'items': 0, 'errors': 0, 'status': 'RUNNING'}
-        self.client.experiment(settings.evaluation_id, summary)
+        if self.persist_summary: self.client.experiment(settings.evaluation_id, summary)
 
         def sample(entry):
             index, row = entry
@@ -38,7 +87,8 @@ class StoredExperiment:
             def select(role):
                 return {f['name']: row[f['name']] for f in fields if f['role'] == role and f['name'] in row}
             value, reference, metadata = select('input'), select('reference'), select('metadata')
-            result = {'id': f'sample-{index:08d}', 'input': value, 'reference': reference, 'output': {},
+            result = {'id': f'{self.sample_prefix}sample-{index:08d}', 'dataset_id': dataset.id,
+                      'dataset_version': self.version, 'input': value, 'reference': reference, 'output': {},
                       'status': 'ERROR', 'error': None, 'scores': [], 'trace': [], 'costUsd': 0, 'modelLatencyMs': 0}
             started = time.perf_counter()
             stage, scorer_id = 'target', None
@@ -93,7 +143,7 @@ class StoredExperiment:
         except Exception:
             summary['status'] = 'FAILED'
             summary['errors'] += 1
-            self.client.experiment(settings.evaluation_id, summary)
+            if self.persist_summary: self.client.experiment(settings.evaluation_id, summary)
             raise
-        self.client.experiment(settings.evaluation_id, summary)
+        if self.persist_summary: self.client.experiment(settings.evaluation_id, summary)
         return {**summary, 'evaluation_id': settings.evaluation_id}

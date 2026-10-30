@@ -4,5 +4,6 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 RUN pip install --no-cache-dir . && useradd -u 10001 -m worker
 USER worker
-WORKDIR /home/worker
+# Keep the default directory traversable when deployment helpers override --user.
+WORKDIR /app
 ENTRYPOINT ["python", "-m", "evaluation_backend.worker"]

@@ -26,6 +26,8 @@ class TraceDocument(BaseModel):
 
 class SampleDocument(BaseModel):
     id: str = Field(min_length=1, max_length=128)
+    dataset_id: str | None = Field(default=None, min_length=1, max_length=128)
+    dataset_version: int | None = Field(default=None, ge=1)
     input: dict[str, Any]
     reference: dict[str, Any]
     output: dict[str, Any]
@@ -52,12 +54,23 @@ class SampleDocument(BaseModel):
         return self
 
 
+class DatasetExecutionResult(BaseModel):
+    dataset_id: str = Field(min_length=1, max_length=128)
+    dataset_version: int = Field(ge=1)
+    name: str
+    sample_count: int = Field(ge=0)
+    items: int = Field(ge=0)
+    errors: int = Field(ge=0)
+    status: Literal['QUEUED', 'RUNNING', 'COMPLETED', 'FAILED']
+
+
 class ExperimentDocument(BaseModel):
     status: Literal['RUNNING', 'COMPLETED', 'FAILED']
     dataset_id: str
     dataset_version: int = Field(ge=1)
     items: int = Field(ge=0)
     errors: int = Field(ge=0)
+    dataset_results: list[DatasetExecutionResult] | None = Field(default=None, max_length=20)
 
 
 @router.get('/datasets')
@@ -157,6 +170,7 @@ def report(ident: str, x_project_id: str = Header(min_length=1), offset: int = Q
     experiment = public(service.storage.get('experiments', x_project_id, ident))
     samples = service.page('samples', x_project_id, filters={'evaluation_id': ident}, offset=offset, limit=limit)
     return {'evaluation_id': ident, 'status': experiment['status'], 'experiment': experiment,
+            'datasets': service.dataset_summary(x_project_id, ident, experiment),
             'results': samples['items'], 'total': samples['total'], 'offset': offset, 'limit': limit,
             'partial': experiment['status'] == 'RUNNING',
             'nextOffset': offset + limit if offset + limit < samples['total'] else None}

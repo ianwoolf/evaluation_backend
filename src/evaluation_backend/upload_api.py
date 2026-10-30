@@ -27,6 +27,16 @@ async def upload(request:Request, dataset_id:str=Query(min_length=1,max_length=1
 @router.get('/run-input/{evaluation}')
 def run_input(evaluation:str,x_project_id:str=Header(min_length=1),service=Depends(get_service),store=Depends(get_upload_store)):
     context=service.storage.get('run-contexts',x_project_id,evaluation)
+    if context.get('datasets'):
+        contents = []
+        for selection in context['datasets']:
+            if selection.get('upload_id'):
+                try: content = store.read(x_project_id, selection['upload_id'], evaluation)
+                except UploadError as e: raise HTTPException(410, str(e)) from None
+            else:
+                content = service.dataset_version(x_project_id, selection['dataset_id'], selection['dataset_version'])
+            contents.append({**content, 'dataset_id': selection['dataset_id'], 'version': selection['dataset_version']})
+        return {'datasets': contents}
     if context.get('upload_id'):
         try:return store.read(x_project_id,context['upload_id'],evaluation)
         except UploadError as e:raise HTTPException(410,str(e)) from None
@@ -38,6 +48,8 @@ def cleanup_run(service,project,evaluation):
     try:context=service.storage.get('run-contexts',project,evaluation)
     except NotFound:return
     if context.get('upload_id'):get_upload_store().delete(project,context['upload_id'])
+    for selection in context.get('datasets', []):
+        if selection.get('upload_id'):get_upload_store().delete(project,selection['upload_id'])
 
 
 def reconcile_uploads():

@@ -43,13 +43,14 @@ cp .env.example .env
 # Linux/WSL 必须设置为实际 socket 组，API 以非 root 用户访问 Docker。
 export DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
 printf '\nDOCKER_GID=%s\n' "$DOCKER_GID" >> .env
-docker compose build evaluation-api
+docker pull ianwoolf/evaluation-worker:2.2
 
 # 在应用镜像中执行初始化，不要求宿主机安装 Python。
-docker run --rm --user "$(id -u):$(id -g)" \
+docker run --rm --user "$(id -u):$(id -g)" --workdir /deployment \
   -v "$PWD:/deployment" --entrypoint python \
-  evaluation-worker:deploy-v2 /deployment/init_secrets.py
+  ianwoolf/evaluation-worker:2.2 /deployment/init_secrets.py
 
+docker compose pull
 docker compose up -d --no-build --wait
 ```
 
@@ -66,7 +67,11 @@ docker compose exec -T evaluation-api python - < seed_demo.py
 docker compose ps
 ```
 
-seed_demo.py 只创建缺失的合成数据集、none 执行环境和 mock target 配置，不覆盖已有资源。
+seed_demo.py 只创建缺失的 target、合成数据集、none 执行环境和 mock target 配置，不覆盖已有资源。
+
+默认使用已发布镜像，无需在部署机安装编译依赖。需要从源码构建时，可用
+`docker compose build evaluation-api` 替代拉取 worker 镜像；API 与动态 runner 必须使用同一镜像标签。
+已有 `.env` 需同步更新 EVAL_WORKER_IMAGE；它会覆盖 compose.yaml 的默认值。
 
 ## runner 与持久化
 
@@ -88,7 +93,7 @@ seed_demo.py 只创建缺失的合成数据集、none 执行环境和 mock targe
 联网机器分别构建 API/runner 和 UI，准备与目标架构一致的 ES 镜像；导出：
 
 ```bash
-docker save -o evaluation-images.tar evaluation-worker:deploy-v2 evaluation-ui:deploy-v2 docker.io/library/elasticsearch:8.19.23
+docker save -o evaluation-images.tar ianwoolf/evaluation-worker:2.2 ianwoolf/evaluation-ui:2.2 docker.io/library/elasticsearch:8.19.23
 ```
 
 离线机器 `docker load -i evaluation-images.tar`，然后按上面的初始化与
@@ -98,9 +103,9 @@ docker save -o evaluation-images.tar evaluation-worker:deploy-v2 evaluation-ui:d
 导入旧私有模型注册表时，可在配置初始化命令中显式挂载源文件，例如：
 
 ```bash
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/deployment" \
+docker run --rm --user "$(id -u):$(id -g)" --workdir /deployment -v "$PWD:/deployment" \
   -v /private/models.json:/input/models.json:ro -e EVAL_MODEL_REGISTRY=/input/models.json \
-  --entrypoint python evaluation-worker:deploy-v2 /deployment/init_secrets.py
+  --entrypoint python ianwoolf/evaluation-worker:2.2 /deployment/init_secrets.py
 ```
 
 只导入新的模型 token 键，不覆盖已有 token；轮换已有模型 token 请更新对应 Secret 文件。

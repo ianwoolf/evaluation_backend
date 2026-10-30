@@ -139,6 +139,52 @@ class EvaluationStorageService:
         return [{**{k: v for k, v in g.items() if k != 'sum'},
                  'average': g['sum'] / g['scored_samples']} for g in groups.values()]
 
+    def dataset_summary(self, project, evaluation_id, experiment):
+        """Aggregate all pages, never just the visible sample page. No vendor coupling."""
+        try:
+            context = self.storage.get('run-contexts', project, evaluation_id)
+        except NotFound:
+            context = experiment
+        selections = context.get('datasets') or [{'dataset_id': context.get('dataset_id', experiment.get('dataset_id')),
+            'dataset_version': context.get('dataset_version', experiment.get('dataset_version')),
+            'sample_count': context.get('total_samples', experiment.get('items', 0))}]
+        outcomes = {d['dataset_id']: d for d in experiment.get('dataset_results') or []}
+        groups = {}
+        for selected in selections:
+            ident = selected['dataset_id']
+            outcome = outcomes.get(ident, {})
+            groups[ident] = {k: selected.get(k) for k in ('dataset_id', 'dataset_version', 'name', 'sample_count')}
+            groups[ident].update(status=outcome.get('status', experiment['status'] if len(selections) == 1 else 'QUEUED'),
+                completed=0, passed=0, failed=0, errors=0, latency_sum=0, scores={})
+        cursor = 0
+        while True:
+            page = self.storage.search('samples', project, filters={'evaluation_id': evaluation_id}, offset=cursor, limit=100)
+            for sample in page['items']:
+                ident = sample.get('dataset_id') or selections[0]['dataset_id']
+                if ident not in groups: continue
+                group = groups[ident]
+                group['completed'] += 1
+                group[{'PASS': 'passed', 'FAIL': 'failed', 'ERROR': 'errors'}[sample['status']]] += 1
+                group['latency_sum'] += sample.get('latencyMs', 0)
+                for score in sample.get('scores', []):
+                    key = (score['scorerId'], score.get('scorerVersion'))
+                    metric = group['scores'].setdefault(key, {'scorer_id': key[0], 'scorer_version': key[1], 'count': 0, 'passed': 0, 'sum': 0})
+                    metric['count'] += 1
+                    metric['passed'] += int(score['passed'])
+                    metric['sum'] += score['value']
+            cursor += len(page['items'])
+            if not page['items'] or cursor >= page['total']: break
+        results = []
+        for group in groups.values():
+            count = group['completed']
+            group['pass_rate'] = group['passed'] / count if count else None
+            group['average_latency_ms'] = group.pop('latency_sum') / count if count else None
+            group['scores'] = [{**{k: v for k, v in s.items() if k != 'sum'}, 'average': s['sum'] / s['count']} for s in group['scores'].values()]
+            if experiment['status'] in ('FAILED', 'CANCELLED') and group['status'] in ('QUEUED', 'RUNNING'):
+                group['status'] = experiment['status']
+            results.append(group)
+        return results
+
 
 @lru_cache(maxsize=1)
 def get_service():

@@ -278,3 +278,57 @@ Local provider credentials are stored in ignored `data/models.json`, referenced 
 See [local Kubernetes deployment and evaluation Jobs](deploy/kubernetes/README.md).
 Includes API service manifests, secret rendering and an explicit direct-Job trigger CLI;
 the guide separately describes the OpenShell Kubernetes sandbox path and its prerequisites.
+
+## Multi-dataset evaluations
+
+`POST /api/v1/evaluations/targets/{target_id}/runs` accepts an optional `datasets`
+array. One request creates one evaluation / worker Job and one report. The saved
+Config still supplies the environment, model, scorer IDs and data-source mode;
+its `datasets` list defines the allowed dataset/version pairs. Save this list via
+`POST /targets/{target_id}/config` before triggering. Trigger may select a nonempty
+subset, but cannot introduce another dataset or change a pinned version. Legacy
+configs without `datasets` allow only their original `dataset_id`/`dataset_version`.
+
+```json
+{
+  "name": "Guardrail dataset comparison",
+  "config_revision": "3:1",
+  "datasets": [
+    {"dataset_id": "conversation-safety", "dataset_version": 1},
+    {"dataset_id": "prompt-injection", "dataset_version": 2}
+  ]
+}
+```
+
+Use the existing `X-Project-ID` and `Idempotency-Key` headers. Select 1–20 unique
+datasets, with 1–10,000 samples in total. Versions must already be published and
+all datasets must support the configured scorers. For upload-mode configurations,
+each entry must additionally contain its own validated `upload_id`; each upload
+is bound to that dataset/version and cleaned up when the evaluation terminates.
+Omitting `datasets` preserves the original single-dataset request contract.
+
+The worker processes datasets in selection order, with sample concurrency inside
+each dataset. Every sample carries `dataset_id` and `dataset_version`; sample IDs
+have a dataset prefix to avoid collisions. A dataset execution/scoring error does
+not discard other dataset results; the overall run fails if any dataset errors.
+A low score is a finding (`FAIL` sample), not an execution failure.
+
+Storage continues to use the existing three indices:
+
+- `evaluation-records-v2`: immutable run `datasets` selection (including upload
+  references where applicable), separate mutable `dataset_results` progress.
+  Summary writes do not overwrite the selection. Single-dataset fields remain
+  for compatibility and refer to the first dataset.
+- `evaluation-samples-v2`: each sample additionally stores `dataset_id` and
+  `dataset_version`, with its existing embedded scores. No new index is needed.
+- `evaluation-traces-v1`: unchanged; dataset-prefixed sample IDs link traces back
+  to their dataset's sample.
+
+`GET /api/v1/evaluations/reports/{experiment_id}` returns `datasets` alongside
+paginated `results`. Each dataset summary contains its version, status,
+`sample_count`, `completed`, `passed`, `failed`, `errors`, `pass_rate`,
+`average_latency_ms`, and per-scorer/version averages and counts. Aggregation
+covers every stored sample, independently of the report's `offset` / `limit`.
+Pass rate uses processed samples including errors; an unprocessed dataset has
+null metrics. Running results are provisional. The UI displays this comparison
+and filters sample details by dataset; exported reports include both.

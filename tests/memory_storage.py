@@ -15,5 +15,6 @@ class Memory:
         return self.get(c,p,i)
     def search(self,c,p,filters=None,**kw):
         rows=[v for (cc,pp,_),v in self.data.items() if (cc,pp)==(c,p) and all(v.get(k)==x for k,x in (filters or {}).items())]
-        return {'items':copy.deepcopy(rows),'total':len(rows)}
+        offset=kw.get('offset',0)
+        return {'items':copy.deepcopy(rows[offset:offset+kw.get('limit',len(rows))]),'total':len(rows)}
 

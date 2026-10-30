@@ -29,7 +29,7 @@ services:
     networks: [evaluation]
 
   init-uploads:
-    image: ${EVAL_WORKER_IMAGE:-evaluation-worker:deploy-v2}
+    image: ${EVAL_WORKER_IMAGE:-ianwoolf/evaluation-worker:2.2}
     user: '0:0'
     entrypoint: [python, -c, 'import os; os.chown("/uploads",10001,10001); os.chmod("/uploads",0o700)']
     volumes: [uploads:/uploads]
@@ -37,7 +37,7 @@ services:
     restart: 'no'
 
   evaluation-api:
-    image: ${EVAL_WORKER_IMAGE:-evaluation-worker:deploy-v2}
+    image: ${EVAL_WORKER_IMAGE:-ianwoolf/evaluation-worker:2.2}
     build:
       context: ../..
       dockerfile: Dockerfile.worker
@@ -45,7 +45,7 @@ services:
     environment:
       EVAL_CONFIG_FILE: /config/backend.env
       EVAL_DOCKER_NETWORK: ${EVAL_NETWORK:-evaluation-compose}
-      EVAL_WORKER_IMAGE: ${EVAL_WORKER_IMAGE:-evaluation-worker:deploy-v2}
+      EVAL_WORKER_IMAGE: ${EVAL_WORKER_IMAGE:-ianwoolf/evaluation-worker:2.2}
       EVAL_TRIGGER_TOKEN_FILE: /run/secrets/trigger_token
       EVAL_MODEL_RESOLVER_TOKEN_FILE: /run/secrets/resolver_token
       EVAL_MODEL_TOKENS_FILE: /run/secrets/model_tokens

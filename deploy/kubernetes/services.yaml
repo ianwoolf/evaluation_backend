@@ -51,7 +51,7 @@ data:
   EVAL_DEFAULT_PROJECT_ID: individual
   EVAL_EXECUTION_BACKEND: kubernetes
   EVAL_MODEL_REGISTRY: /config/models.json
-  EVAL_WORKER_IMAGE: evaluation-worker:targets-db-20261028
+  EVAL_WORKER_IMAGE: evaluation-worker:configured-datasets-20261030
   EVAL_UPLOAD_DIR: /uploads
   EVAL_CONTENT_POLICY: '{"input":"retain","response":"retain","reference":"retain"}'
 ---
@@ -95,7 +95,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: evaluation-worker:targets-db-20261028
+        image: evaluation-worker:configured-datasets-20261030
         imagePullPolicy: IfNotPresent
         command:
         - python
