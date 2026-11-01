@@ -94,6 +94,9 @@ def create_proxy(env=None, client=None, telemetry=None):
         body = await request.json()
         if not isinstance(body, dict) or not isinstance(body.get('messages'), list):
             raise HTTPException(400, 'messages required')
+        selected_model = request.headers.get('x-eval-judge-model') or env['EVAL_MODEL_ID']
+        if selected_model != env['EVAL_MODEL_ID'] and selected_model not in json.loads(env.get('EVAL_JUDGE_MODEL_IDS','[]')):
+            raise HTTPException(403,'Judge model is not enabled for this run')
         stream = body.get('stream', False)
         if type(stream) is not bool:
             raise HTTPException(400, 'stream must be boolean')
@@ -101,8 +104,8 @@ def create_proxy(env=None, client=None, telemetry=None):
         allowed = {'messages', 'temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'stop', 'seed', 'tools', 'tool_choice', 'parallel_tool_calls', 'response_format', 'presence_penalty', 'frequency_penalty', 'n', 'thinking'}
         payload = {k: v for k, v in body.items() if k in allowed}
         started = time.perf_counter()
-        event('model_proxy.invoke.started', model_id=env['EVAL_MODEL_ID'])
-        metadata = {'model_id': env['EVAL_MODEL_ID'], 'experiment_id': env.get('EXPERIMENT_ID') or env.get('EVALUATE_ID', env.get('EVALUATION_ID', '')), 'client_stream': stream, 'request_parameters': {k: v for k, v in payload.items() if k != 'messages'}}
+        event('model_proxy.invoke.started', model_id=selected_model)
+        metadata = {'model_id': selected_model, 'experiment_id': env.get('EXPERIMENT_ID') or env.get('EVALUATE_ID', env.get('EVALUATION_ID', '')), 'client_stream': stream, 'request_parameters': {k: v for k, v in payload.items() if k != 'messages'}}
         trace_context = None
         import re
         parent = re.fullmatch(r'00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}', request.headers.get('traceparent', ''))
@@ -113,7 +116,7 @@ def create_proxy(env=None, client=None, telemetry=None):
         upstream = None
         try:
             from urllib.parse import quote
-            resolved = await client.get(env['EVAL_MODEL_RESOLVER_URL'].rstrip('/') + '/internal/models/' + quote(env['EVAL_MODEL_ID'], safe=''), headers={'Authorization': 'Bearer ' + env['EVAL_MODEL_RESOLVER_TOKEN']})
+            resolved = await client.get(env['EVAL_MODEL_RESOLVER_URL'].rstrip('/') + '/internal/models/' + quote(selected_model, safe=''), headers={'Authorization': 'Bearer ' + env['EVAL_MODEL_RESOLVER_TOKEN']})
             resolved.raise_for_status()
             model = resolved.json()
             payload.update(model=model['model'], stream=True, stream_options={'include_usage': True})
@@ -121,7 +124,7 @@ def create_proxy(env=None, client=None, telemetry=None):
             upstream = await client.send(client.build_request('POST', model['address'].rstrip('/') + '/chat/completions', json=payload, headers={'Authorization': 'Bearer ' + model['token']}), stream=True)
             upstream.raise_for_status()
         except Exception as error:
-            event('model_proxy.upstream.failed', level='ERROR', error=error, model_id=env['EVAL_MODEL_ID'])
+            event('model_proxy.upstream.failed', level='ERROR', error=error, model_id=selected_model)
             if upstream is not None:
                 await upstream.aclose()
             span.update(level='ERROR', status_message='model resolution or upstream request failed', metadata={**metadata, 'duration_ms': (time.perf_counter()-started)*1000})
@@ -153,7 +156,7 @@ def create_proxy(env=None, client=None, telemetry=None):
                 if not done:
                     raise ValueError('incomplete provider stream')
             except BaseException as error:
-                event('model_proxy.stream.failed', level='ERROR', error=error, model_id=env['EVAL_MODEL_ID'])
+                event('model_proxy.stream.failed', level='ERROR', error=error, model_id=selected_model)
                 failed = True
                 span.update(level='ERROR', status_message='LLM stream interrupted')
                 raise
@@ -170,7 +173,7 @@ def create_proxy(env=None, client=None, telemetry=None):
                 span.update(output=output.get('choices'), usage_details=usage_details, metadata=metadata)
                 span.end()
                 event('model_proxy.invoke.finished', status='FAILED' if failed else 'COMPLETED',
-                      duration_ms=round((time.perf_counter()-started)*1000, 2), model_id=env['EVAL_MODEL_ID'])
+                      duration_ms=round((time.perf_counter()-started)*1000, 2), model_id=selected_model)
         if stream:
             return StreamingResponse(events(), media_type='text/event-stream', headers={'Cache-Control': 'no-cache'})
         try:

@@ -46,6 +46,10 @@ def create_app() -> FastAPI:
     instrument_app(app)
 
     app.include_router(router)
+    from evaluation_backend.scorer_catalog import router as scorer_catalog_router
+    app.include_router(scorer_catalog_router)
+    from evaluation_backend.capabilities import router as capabilities_router
+    app.include_router(capabilities_router)
     from evaluation_backend.runs import router as runs_router
     app.include_router(runs_router)
     from evaluation_backend.storage.api import router as storage_router

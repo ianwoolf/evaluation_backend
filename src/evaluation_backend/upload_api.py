@@ -35,7 +35,8 @@ def run_input(evaluation:str,x_project_id:str=Header(min_length=1),service=Depen
                 except UploadError as e: raise HTTPException(410, str(e)) from None
             else:
                 content = service.dataset_version(x_project_id, selection['dataset_id'], selection['dataset_version'])
-            contents.append({**content, 'dataset_id': selection['dataset_id'], 'version': selection['dataset_version']})
+            contents.append({**content, 'dataset_id': selection['dataset_id'], 'version': selection['dataset_version'],
+                             **({'scorer_ids': selection['scorer_ids'], 'metadata': selection['scorer_metadata']} if 'scorer_ids' in selection else {})})
         return {'datasets': contents}
     if context.get('upload_id'):
         try:return store.read(x_project_id,context['upload_id'],evaluation)

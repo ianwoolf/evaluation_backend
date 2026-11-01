@@ -34,6 +34,13 @@ class InstalledScorerLibrary:
             threshold = config.get('threshold', .8)
             if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
                 raise ValueError('scorer threshold must be finite in [0,1]')
+            if config.get('execution'):
+                from evaluation_backend.executable_scorers import validate_execution, evaluate_execution, envelope
+                execution=validate_execution(config['execution'])
+                def execute(*,input,output,reference,metadata=None,_config=execution):
+                    return evaluate_execution(_config,envelope(input,output,reference,metadata))
+                result.append(Scorer(scorer_id,str(config['version']),float(threshold),execute))
+                continue
             library = config.get('library')
             function = self.registry.get(library)
             if function is None:

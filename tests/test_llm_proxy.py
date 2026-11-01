@@ -22,7 +22,7 @@ class Telemetry:
     def flush(self): pass
 
 
-def setup(stream_error=False):
+def setup(stream_error=False, judge_models=None):
     calls = []
     def handle(request):
         calls.append(request)
@@ -38,6 +38,7 @@ def setup(stream_error=False):
     telemetry = Telemetry()
     env = {'EVAL_MODEL_ID': 'chosen', 'EVAL_MODEL_RESOLVER_URL': 'http://backend.test',
            'EVAL_MODEL_RESOLVER_TOKEN': 'resolver-secret', 'EVAL_LLM_PROXY_TOKEN': 'local-secret', 'EVALUATE_ID': 'dev_1'}
+    env['EVAL_JUDGE_MODEL_IDS']=json.dumps(judge_models or [])
     app = create_proxy(env, httpx.AsyncClient(transport=httpx.MockTransport(handle)), telemetry)
     return app, telemetry, calls
 
@@ -123,3 +124,18 @@ def test_openshell_ca_is_used_without_disabling_tls(monkeypatch):
     assert seen[-1] == {'cafile': '/fallback.pem'}
     proxy_ssl_context({})
     assert seen[-1] == {'cafile': None}
+
+
+def test_unapproved_judge_model_is_rejected_before_resolver():
+    app, telemetry, calls = setup()
+    with TestClient(app) as client:
+        response=client.post('/v1/chat/completions',headers={'Authorization':'Bearer local-secret','X-Eval-Judge-Model':'unapproved'},json={'messages':[]})
+    assert response.status_code==403 and not calls
+
+
+def test_allowed_judge_uses_independent_model_resolver():
+    app, telemetry, calls=setup(judge_models=['judge'])
+    with TestClient(app) as client:
+        response=client.post('/v1/chat/completions',headers={'Authorization':'Bearer local-secret','X-Eval-Judge-Model':'judge'},json={'messages':[]})
+    assert response.status_code==200
+    assert calls[0].url.path=='/internal/models/judge'

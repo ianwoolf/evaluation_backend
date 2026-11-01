@@ -90,3 +90,22 @@ def test_es_password_auth_from_environment(monkeypatch):
     storage = ElasticsearchStorage.from_env()
     assert isinstance(storage.client.auth, httpx.BasicAuth)
     storage.client.close()
+
+
+def test_scorer_specs_roundtrip_and_search_isolation():
+    import json
+    calls = []
+    def handle(request):
+        body=json.loads(request.content) if request.content else {}
+        calls.append(body)
+        if request.url.path.endswith('_search'):
+            return httpx.Response(200,json={'hits':{'hits':[],'total':{'value':0}}})
+        return httpx.Response(200,json={'_seq_no':1,'_primary_term':1})
+    storage=ElasticsearchStorage('http://es.test',client=httpx.Client(transport=httpx.MockTransport(handle)))
+    spec={'id':'s','source':'CUSTOM','enabled':True,'draft':{'name':'Grounding','criteria':{'expectation':'Grounded'}},'versions':[]}
+    storage.put('scorers','project-a','s',spec,create=True)
+    doc=calls[-1]
+    assert doc['record_type']=='scorer' and doc['spec']==spec
+    assert storage.decode('scorers',{'_source':doc,'_seq_no':1,'_primary_term':1})=={**spec,'_revision':'1:1'}
+    storage.search('scorers','project-a')
+    assert calls[-1]['query']['bool']['filter']==[{'term':{'project_id':'project-a'}},{'term':{'record_type':'scorer'}},{'term':{'state':'head'}}]

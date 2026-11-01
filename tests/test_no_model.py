@@ -94,3 +94,13 @@ def test_model_latency_survives_content_redaction():
     sample = SampleDocument(id='s', input={}, reference={}, output={}, status='PASS',
                             latencyMs=12, modelLatencyMs=0, scores=[], trace=[])
     assert policy.sample(sample.model_dump())['modelLatencyMs'] == 0
+
+
+def test_demo_sample_provenance(monkeypatch):
+    monkeypatch.setenv('EVAL_MODEL_ID', 'none')
+    client = Mock()
+    client.version.return_value = {'name': 'test', 'metadata': {}, 'fields': [], 'rows': [{}]}
+    from evaluation_backend.demo_scoring import DemoScorerLibrary
+    settings = Settings('ds', 'eval', ['risk'], datetime.now(timezone.utc))
+    StoredExperiment(client).run(settings, DemoScorerLibrary(), None)
+    assert client.sample.call_args.args[1]['scores'][0]['source'] == 'mock'

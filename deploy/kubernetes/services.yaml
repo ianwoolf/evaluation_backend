@@ -47,11 +47,13 @@ metadata:
   name: evaluation-api-config
   namespace: evaluation
 data:
+  EVAL_SCORING_ENABLED: 'true'
+  EVAL_REPORT_REFLECTION_ENABLED: 'false'
   EVAL_AUTH_MODE: none
   EVAL_DEFAULT_PROJECT_ID: individual
   EVAL_EXECUTION_BACKEND: kubernetes
   EVAL_MODEL_REGISTRY: /config/models.json
-  EVAL_WORKER_IMAGE: evaluation-worker:configured-datasets-20261030
+  EVAL_WORKER_IMAGE: evaluation-worker:compact-workbench-20261101
   EVAL_UPLOAD_DIR: /uploads
   EVAL_CONTENT_POLICY: '{"input":"retain","response":"retain","reference":"retain"}'
 ---
@@ -95,7 +97,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: evaluation-worker:configured-datasets-20261030
+        image: evaluation-worker:compact-workbench-20261101
         imagePullPolicy: IfNotPresent
         command:
         - python

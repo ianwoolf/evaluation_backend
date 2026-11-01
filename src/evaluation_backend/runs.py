@@ -53,6 +53,7 @@ class StartRun(BaseModel):
     environment_version: int = Field(default=1, ge=1, strict=True)
     model_id: str
     scorer_ids: list[str]
+    scorer_selection: Literal['shared','dataset'] = 'shared'
     scoring_mode: Literal['mock', 'installed']
     snapshot: dict
     resources: PodResources | None = None
@@ -179,6 +180,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         return summary(previous, cluster, service, x_project_id)
     from evaluation_backend.environments import environment_version
     from evaluation_backend.targets import get_target
+    if service.is_archived(x_project_id,'environments',request.environment_id):raise HTTPException(422,'Environment is archived; select an active environment')
     environment = environment_version(service, x_project_id, request.environment_id, request.environment_version)
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
@@ -194,18 +196,12 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         raise HTTPException(422, 'Primary dataset must match the first selection')
     versions = [service.dataset_version(x_project_id, s.dataset_id, s.dataset_version) for s in selections]
     version = versions[0]
-    if request.scoring_mode == 'mock':
-        if request.scorer_ids != ['mock-score']: raise HTTPException(422, 'Mock mode requires only mock-score')
-    else:
-        from evaluation_backend.experiment import Dataset
-        from evaluation_backend.scorers import InstalledScorerLibrary
-        try:
-            if not request.scorer_ids or len(request.scorer_ids) != len(set(request.scorer_ids)): raise ValueError('Scorers must be nonempty and unique')
-            for selected, content in zip(selections, versions):
-                allowed = content.get('scorerIds', [])
-                if allowed and any(s not in allowed for s in request.scorer_ids): raise ValueError('Scorer is not enabled for dataset ' + selected.dataset_id)
-                InstalledScorerLibrary().get_scorers(Dataset(selected.dataset_id, content['name'], content['metadata']), request.scorer_ids)
-        except ValueError as error: raise HTTPException(422, str(error)) from None
+    from evaluation_backend.scorer_selection import resolve_scorers
+    try:
+        bindings = [resolve_scorers(selected.dataset_id, content, selection=request.scorer_selection,
+                    mode=request.scoring_mode, shared=request.scorer_ids, service=service, project=x_project_id) for selected, content in zip(selections, versions)]
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
     dataset_records = []
     for selected, content in zip(selections, versions):
         size = len(content['rows'])
@@ -214,11 +210,17 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
             except UploadError as error: raise HTTPException(422, str(error)) from None
         if request.datasets is not None and not size:
             raise HTTPException(422, 'Dataset has no samples: ' + selected.dataset_id)
-        dataset_records.append({**selected.model_dump(), 'name': content['name'], 'sample_count': size})
+        dataset_records.append({**selected.model_dump(), 'name': content['name'], 'sample_count': size,
+                                **bindings[len(dataset_records)], 'objective': content.get('objective','')})
+    from evaluation_backend.aspects import snapshot_scorers
+    for d in dataset_records:
+        d['scorer_bindings'] = snapshot_scorers(service, x_project_id, d['scorer_ids'], d['scorer_metadata'])
     count = sum(d['sample_count'] for d in dataset_records)
     if (request.datasets is not None and not count) or count > 10000:
         raise HTTPException(422, 'An evaluation requires 1 to 10,000 samples across all datasets')
-    context = {'id': experiment, 'target': target, 'environment': environment, 'dataset_id': request.dataset_id, 'dataset_version': request.dataset_version,
+    from evaluation_backend.capabilities import capabilities
+    feature_modes = capabilities()
+    context = {'feature_modes': feature_modes, 'id': experiment, 'target': target, 'environment': environment, 'dataset_id': request.dataset_id, 'dataset_version': request.dataset_version,
                'upload_id': request.upload_id, 'content_policy': ContentPolicy.from_env().model_dump(), 'request_hash': digest}
     from zoneinfo import ZoneInfo
     generated_name = target['name'][:150] + ' · ' + datetime.now(ZoneInfo(os.getenv('EVAL_NAME_TIMEZONE', 'Asia/Shanghai'))).strftime('%Y-%m-%d %H:%M:%S')
@@ -227,7 +229,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
                    environment_version=request.environment_version, scorer_ids=request.scorer_ids,
                    scoring_mode=request.scoring_mode, total_samples=count,
                    created_at=datetime.now(timezone.utc).isoformat())
-    if request.datasets is not None:
+    context['scoring_selections'] = dataset_records
+    if request.datasets is not None or request.scorer_selection == 'dataset':
         context['datasets'] = dataset_records
     try: service.storage.put('run-contexts', x_project_id, experiment, context, create=True)
     except Conflict:
@@ -246,14 +249,19 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
                 'scorers': []}
     snapshot['dataset'].update(rows=[], objective='', description='', tags=[], metadata={}, scorerIds=[])
     record = {k: v for k,v in request.model_dump().items() if k not in ('snapshot', 'upload_id')}
+    record['feature_modes'] = context.get('feature_modes', feature_modes)
     record.update(name=context.get('name', request.name.strip() or generated_name), snapshot=snapshot, sample_count=count, resources=resources.model_dump())
-    record['datasets'] = [{k: v for k, v in d.items() if k != 'upload_id'} for d in dataset_records]
-    job = build_job(request.dataset_id, request.model_id, request.scorer_ids,
+    record['datasets'] = [{k: v for k, v in d.items() if k not in ('upload_id','scorer_metadata','scorer_bindings')} for d in dataset_records]
+    effective_ids = list(dict.fromkeys(s for b in bindings for s in b['scorer_ids']))
+    record['scorer_ids'] = effective_ids
+    job = build_job(request.dataset_id, request.model_id, effective_ids,
                     namespace=cluster.namespace, image=os.environ['EVAL_WORKER_IMAGE'], mock=request.scoring_mode == 'mock', experiment_id=experiment, resources=resources)
     job['metadata']['name'] = name
     job['metadata']['labels']['project'] = project_label(x_project_id)
     job['metadata']['annotations'] = {PREFIX + 'project': x_project_id, PREFIX + 'record': json.dumps(record), PREFIX + 'request-hash': digest}
     job['spec']['template']['spec']['containers'][0]['env'].extend([
+        {'name':'EVAL_JUDGE_MODEL_IDS','value':json.dumps(sorted({c['execution']['model_id'] for b in bindings for c in b['scorer_metadata'].get('evaluation',{}).get('scorers',{}).values() if c.get('execution',{}).get('engine')=='llm_judge'}))},
+        {'name': 'EVAL_SCORING_ENABLED', 'value': str(context.get('feature_modes', feature_modes)['scoring_enabled']).lower()},
         {'name': 'EVAL_DATASET_VERSION', 'value': str(request.dataset_version)},
         {'name': 'EVAL_PLATFORM', 'value': 'storage'},
         {'name': 'EVAL_PROJECT_ID', 'value': x_project_id},

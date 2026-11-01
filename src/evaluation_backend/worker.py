@@ -88,7 +88,14 @@ def main():
         target = None
         if os.getenv('EVAL_MODEL_ID') != 'none':
             target = LlmClassificationTarget() if target_mode == 'llm' else HttpGuardrail(os.environ['EVAL_TARGET_URL'], os.getenv('EVAL_MODEL_ID'), os.getenv('EVAL_TARGET_TOKEN'))
-        library = MockScorerLibrary() if scorer_mode == 'mock' else InstalledScorerLibrary()
+        from evaluation_backend.capabilities import scoring_enabled
+        if not scoring_enabled():
+            scorer_mode = 'mock'
+            from evaluation_backend.demo_scoring import DemoScorerLibrary
+            library = DemoScorerLibrary()
+        else:
+            library = MockScorerLibrary() if scorer_mode == 'mock' else InstalledScorerLibrary()
+        event('evaluation.scoring', run_id=settings.evaluation_id, source='mock' if scorer_mode == 'mock' else 'real')
         from evaluation_backend.storage.experiment import StoredExperiment
         result = platform.run(settings, library, target) if isinstance(platform, StoredExperiment) else run_experiment(settings, platform, library, platform, target)
         result['experiment_id'] = settings.evaluation_id

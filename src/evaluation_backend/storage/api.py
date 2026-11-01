@@ -169,8 +169,21 @@ def report(ident: str, x_project_id: str = Header(min_length=1), offset: int = Q
     """Read by experiment/evaluation ID, not Kubernetes Job name. Results may be partial."""
     experiment = public(service.storage.get('experiments', x_project_id, ident))
     samples = service.page('samples', x_project_id, filters={'evaluation_id': ident}, offset=offset, limit=limit)
-    return {'evaluation_id': ident, 'status': experiment['status'], 'experiment': experiment,
+    from evaluation_backend.aspects import aspect_results
+    return {**aspect_results(service, x_project_id, ident), 'evaluation_id': ident, 'status': experiment['status'], 'experiment': experiment,
             'datasets': service.dataset_summary(x_project_id, ident, experiment),
             'results': samples['items'], 'total': samples['total'], 'offset': offset, 'limit': limit,
             'partial': experiment['status'] == 'RUNNING',
             'nextOffset': offset + limit if offset + limit < samples['total'] else None}
+
+
+@router.delete('/catalog/{collection}/{ident}')
+def archive_resource(collection: Literal['datasets', 'scorers', 'environments', 'targets'], ident: str,
+                     x_project_id: str = Header(min_length=1), service=Depends(get_service)):
+    return service.archive(x_project_id, collection, ident)
+
+
+@router.post('/catalog/{collection}/{ident}/restore')
+def restore_resource(collection: Literal['datasets', 'scorers', 'environments', 'targets'], ident: str,
+                     x_project_id: str = Header(min_length=1), service=Depends(get_service)):
+    return service.archive(x_project_id, collection, ident, False)

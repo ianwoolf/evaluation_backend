@@ -1,3 +1,4 @@
+import json
 """Run a workload behind a local LLM proxy in an existing Docker/OpenShell sandbox."""
 import os
 import secrets
@@ -35,7 +36,7 @@ def main():
     try:
         collector = subprocess.Popen([sys.executable, '-m', 'evaluation_backend.collector'], env=collector_env)
         event('runner.service.spawned', component='collector')
-        proxy = None if os.getenv('EVAL_MODEL_ID') == 'none' else subprocess.Popen([sys.executable, '-m', 'evaluation_backend.llm_proxy'], env=proxy_env)
+        proxy = None if os.getenv('EVAL_MODEL_ID') == 'none' and not json.loads(os.getenv('EVAL_JUDGE_MODEL_IDS','[]')) else subprocess.Popen([sys.executable, '-m', 'evaluation_backend.llm_proxy'], env=proxy_env)
         event('runner.service.skipped' if proxy is None else 'runner.service.spawned', component='model-proxy')
         for _ in range(120):
             if (proxy is not None and proxy.poll() is not None) or collector.poll() is not None:

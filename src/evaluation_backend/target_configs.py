@@ -30,13 +30,16 @@ class TargetConfig(BaseModel):
     environment_id: str = Field(min_length=1,max_length=128)
     environment_version: int = Field(ge=1,strict=True)
     scoring_mode: Literal['mock','installed'] = 'mock'
-    scorer_ids: list[str] = Field(min_length=1,max_length=100)
+    scorer_ids: list[str] = Field(default_factory=list,max_length=100)
+    scorer_selection: Literal['shared','dataset'] = 'shared'
     data_source: Literal['published','upload'] = 'published'
     datasets: list[ConfigDataset] | None = Field(default=None, min_length=1, max_length=20)
 
 
 def selection(project, ident, value, service):
     get_target(service, project, ident)
+    if service.is_archived(project,'targets',ident):raise HTTPException(422,'Target is archived')
+    if service.is_archived(project,'environments',value.environment_id):raise HTTPException(422,'Environment is archived; select an active environment')
     selected = configured_datasets(value.model_dump())
     if len({d['dataset_id'] for d in selected}) != len(selected):
         raise HTTPException(422, 'Select each dataset only once')
@@ -44,17 +47,13 @@ def selection(project, ident, value, service):
         raise HTTPException(422, 'Primary dataset must match the first configured dataset')
     datasets = [service.dataset_version(project,d['dataset_id'],d['dataset_version']) for d in selected]
     environment = environment_version(service,project,value.environment_id,value.environment_version)
-    if value.scoring_mode=='mock':
-        if value.scorer_ids!=['mock-score']:raise HTTPException(422,'Mock mode requires only mock-score')
-    else:
-        from evaluation_backend.experiment import Dataset
-        from evaluation_backend.scorers import InstalledScorerLibrary
-        try:
-            if len(value.scorer_ids)!=len(set(value.scorer_ids)):raise ValueError('Duplicate scorer IDs')
-            for ref, dataset in zip(selected, datasets):
-                if dataset.get('scorerIds') and any(s not in dataset['scorerIds'] for s in value.scorer_ids):raise ValueError('Scorer is not enabled for this dataset version')
-                InstalledScorerLibrary().get_scorers(Dataset(ref['dataset_id'],dataset['name'],dataset['metadata']),value.scorer_ids)
-        except ValueError as e:raise HTTPException(422,str(e)) from None
+    from evaluation_backend.scorer_selection import resolve_scorers
+    try:
+        for ref, dataset in zip(selected, datasets):
+            resolve_scorers(ref['dataset_id'], dataset, selection=value.scorer_selection,
+                            mode=value.scoring_mode, shared=value.scorer_ids, service=service, project=project)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
     return environment
 
 
@@ -99,5 +98,5 @@ def trigger(ident:str,value:TriggerTarget,x_project_id:str=Header(min_length=1),
         raise HTTPException(422,'Each dataset requires an upload only in upload mode')
     request=StartRun(name=value.name,target_id=ident,dataset_id=selections[0].dataset_id,dataset_version=selections[0].dataset_version,
         environment_id=config['environment_id'],environment_version=config['environment_version'],model_id=config['model_id'],
-        scorer_ids=config['scorer_ids'],scoring_mode=config['scoring_mode'],snapshot={},upload_id=value.upload_id,datasets=value.datasets)
+        scorer_selection=config.get('scorer_selection','shared'),scorer_ids=config['scorer_ids'],scoring_mode=config['scoring_mode'],snapshot={},upload_id=None if config.get('scorer_selection')=='dataset' else value.upload_id,datasets=selections if config.get('scorer_selection')=='dataset' else value.datasets)
     return start(request,x_project_id,idempotency_key,cluster,service)

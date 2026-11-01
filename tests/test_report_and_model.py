@@ -14,6 +14,9 @@ def test_target_model_port_does_not_receive_reference():
 def test_report_reads_project_scoped_partial_samples():
     class Store:
         def get(self, collection, project, ident):
+            if collection == 'run-contexts':
+                from evaluation_backend.storage import NotFound
+                raise NotFound('Legacy run')
             assert (collection, project, ident) == ('experiments', 'p', 'exp-1')
             return {'status': 'RUNNING'}
     class Service:

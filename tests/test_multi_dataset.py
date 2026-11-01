@@ -153,3 +153,74 @@ def test_invalid_config_dataset_list_rejected(setup,datasets):
     response=c.post(ROOT+'/targets/g/config',headers=h,json={**value,'datasets':datasets})
     assert response.status_code==422,response.text
     assert k.created==0
+
+
+def test_per_dataset_scorers(setup, monkeypatch):
+    monkeypatch.setenv('EVAL_SCORING_ENABLED','false')
+    c,k,h,service,body=prepare(setup)
+    for ident,ids in [('d',['safety','tone']),('second',['tools'])]:
+        doc=service.storage.get('datasets','p',ident)
+        doc['versions'][0]['scorerIds']=ids
+        service.storage.put('datasets','p',ident,doc)
+    cfg=c.get(ROOT+'/targets/g/config',headers=h).json()
+    payload={key:cfg[key] for key in ('revision','dataset_id','dataset_version','environment_id','environment_version','data_source','datasets')}
+    payload.update(scoring_mode='installed',scorer_ids=[],scorer_selection='dataset')
+    saved=c.post(ROOT+'/targets/g/config',headers=h,json=payload)
+    assert saved.status_code==200,saved.text
+    body['config_revision']=saved.json()['revision']
+    result=c.post(ROOT+'/targets/g/runs',headers=h,json=body)
+    assert result.status_code==200,result.text
+    run=result.json(); exp=run['experiment_id']
+    assert [d['scorer_ids'] for d in run['datasets']]==[['safety','tone'],['tools']]
+    data=c.get(ROOT+'/run-input/'+exp,headers=h).json()
+    monkeypatch.setenv('EVAL_RUN_INPUT_ID',exp);monkeypatch.setenv('EVAL_MODEL_ID','none')
+    seen=[]
+    class Client:
+        def run_input(self,_):return data
+        def experiment(self,*_):pass
+        def sample(self,*_):pass
+    class Library:
+        def get_scorers(self,dataset,ids):
+            seen.append((dataset.id,ids))
+            return [Scorer(s,'1',.8,lambda **_:Score(1,'ok')) for s in ids]
+    StoredExperiment(Client()).run(Settings('d',exp,['unused'],datetime.now(timezone.utc)),Library(),None)
+    assert seen==[('d',['safety','tone']),('second',['tools'])]
+
+
+def test_dataset_scorer_validation_and_version_snapshot(setup, monkeypatch):
+    monkeypatch.setenv('EVAL_SCORING_ENABLED','true')
+    c,k,h,service,body=prepare(setup)
+    from evaluation_backend.scorers import InstalledScorerLibrary
+    calls=[]
+    def load(self,dataset,ids):
+        calls.append((dataset.id,ids,dataset.metadata['evaluation']['scorers']['same']['version']))
+        return []
+    monkeypatch.setattr(InstalledScorerLibrary,'get_scorers',load)
+    for ident,version in [('d','1'),('second','2')]:
+        doc=service.storage.get('datasets','p',ident)
+        doc['versions'][0].update(scorerIds=['same'],metadata={'evaluation':{'scorers':{'same':{'version':version}}}})
+        service.storage.put('datasets','p',ident,doc)
+    cfg=c.get(ROOT+'/targets/g/config',headers=h).json()
+    payload={key:cfg[key] for key in ('revision','dataset_id','dataset_version','environment_id','environment_version','data_source','datasets')}
+    payload.update(scoring_mode='installed',scorer_ids=[],scorer_selection='dataset')
+    saved=c.post(ROOT+'/targets/g/config',headers=h,json=payload)
+    assert saved.status_code==200,saved.text
+    body['config_revision']=saved.json()['revision']
+    run=c.post(ROOT+'/targets/g/runs',headers=h,json=body).json()
+    assert ('d',['same'],'1') in calls and ('second',['same'],'2') in calls
+    doc=service.storage.get('datasets','p','second');doc['versions'][0]['metadata']={}
+    service.storage.put('datasets','p','second',doc)
+    content=c.get(ROOT+'/run-input/'+run['experiment_id'],headers=h).json()['datasets'][1]
+    assert content['metadata']['evaluation']['scorers']['same']['version']=='2'
+
+
+def test_dataset_mode_rejects_missing_scorers_even_in_demo(setup,monkeypatch):
+    monkeypatch.setenv('EVAL_SCORING_ENABLED','false')
+    c,k,h,service,body=prepare(setup)
+    cfg=c.get(ROOT+'/targets/g/config',headers=h).json()
+    payload={key:cfg[key] for key in ('revision','dataset_id','dataset_version','environment_id','environment_version','data_source','datasets')}
+    payload.update(scoring_mode='installed',scorer_ids=[],scorer_selection='dataset')
+    response=c.post(ROOT+'/targets/g/config',headers=h,json=payload)
+    assert response.status_code==422
+    assert 'requires nonempty' in response.json()['detail']
+    assert k.created==0

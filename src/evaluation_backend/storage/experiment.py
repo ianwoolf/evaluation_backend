@@ -41,7 +41,7 @@ class StoredExperiment:
         for index, content in enumerate(contents):
             self.content, self.version = content, content['version']
             self.sample_prefix = f'dataset-{index:03d}-'
-            selected = replace(settings, dataset_id=content['dataset_id'])
+            selected = replace(settings, dataset_id=content['dataset_id'], scorer_ids=content.get('scorer_ids', settings.scorer_ids))
             dataset = Dataset(selected.dataset_id, content['name'], content['metadata'])
             progress = summary['dataset_results'][index]
             progress['status'] = 'RUNNING'
@@ -49,8 +49,8 @@ class StoredExperiment:
             event('dataset.evaluation.started', run_id=settings.evaluation_id, dataset_id=dataset.id)
             try:
                 if not content['rows']: raise ValueError('Dataset has no published records')
-                scorers = library.get_scorers(dataset, settings.scorer_ids)
-                if [s.id for s in scorers] != settings.scorer_ids:
+                scorers = library.get_scorers(dataset, selected.scorer_ids)
+                if [s.id for s in scorers] != selected.scorer_ids:
                     raise ValueError('Scorer library returned unexpected scorers')
                 result = self.execute(selected, dataset, target, scorers)
                 progress.update({k: result[k] for k in ('status', 'items', 'errors')})
@@ -115,6 +115,7 @@ class StoredExperiment:
                     if not isinstance(score, Score):
                         raise ValueError('Scorer must return Score')
                     result['scores'].append({'scorerId': scorer.id, 'scorerVersion': scorer.version,
+                        'source': 'mock' if scorer.version in ('demo-v1', 'mock-v1') else 'real',
                         'value': score.value, 'passed': score.value >= scorer.threshold, 'reason': score.reason})
                     result['trace'].append({'name': scorer.id, 'kind': 'SCORER',
                         'durationMs': (time.perf_counter() - before) * 1000, 'detail': score.reason})

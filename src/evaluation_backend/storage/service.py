@@ -97,8 +97,30 @@ class EvaluationStorageService:
         raise NotFound('Dataset version not found')
 
     def page(self, collection, project, **kwargs):
+        if collection in ('datasets', 'scorers', 'environments', 'targets'):
+            # Keep immutable versions available to old reports and restore operations.
+            offset, limit = kwargs.pop('offset', 0), kwargs.pop('limit', 100)
+            items, cursor = [], 0
+            while True:
+                page = self.storage.search(collection, project, offset=cursor, limit=100, **kwargs)
+                items.extend(v for v in page['items'] if not self.is_archived(project, collection, v['id']))
+                cursor += len(page['items'])
+                if not page['items'] or cursor >= page['total']: break
+            return {'items': [public(v) for v in items[offset:offset+limit]], 'total': len(items)}
         result = self.storage.search(collection, project, **kwargs)
         return {**result, 'items': [public(v) for v in result['items']]}
+
+    def is_archived(self, project, collection, ident):
+        try: return self.storage.get('archives', project, collection + ':' + ident).get('archived', False)
+        except NotFound: return False
+
+    def archive(self, project, collection, ident, archived=True):
+        self.storage.get(collection, project, ident)
+        key = collection + ':' + ident
+        self.storage.put('archives', project, key, {'collection': collection, 'resource_id': ident,
+            'archived': archived, 'updated_at': now()})
+        return {'id': ident, 'archived': archived}
+
 
     def scores(self, project, evaluation_id, *, offset=0, limit=100):
         """Compatibility endpoint: scores have one source of truth, their sample."""
