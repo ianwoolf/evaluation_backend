@@ -13,3 +13,7 @@ dist/
 build/
 .idea/
 .vscode/
+
+# Local SSH test keys must never be committed or included in images.
+.test/test_rsa
+.test/test_rsa.pub
