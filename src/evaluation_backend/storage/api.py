@@ -11,6 +11,7 @@ from evaluation_backend.runs import authorize
 from evaluation_backend.content_policy import policy_for
 from evaluation_backend.targets import trace_target
 from .service import DatasetDocument, get_service, now, public
+from evaluation_backend.guardrail_contracts import GuardrailRequestResult
 
 router = APIRouter(prefix='/api/v1/evaluations', dependencies=[Depends(authorize)])
 
@@ -25,6 +26,7 @@ class TraceDocument(BaseModel):
 
 
 class SampleDocument(BaseModel):
+    guardrail_result: GuardrailRequestResult | None = None
     id: str = Field(min_length=1, max_length=128)
     dataset_id: str | None = Field(default=None, min_length=1, max_length=128)
     dataset_version: int | None = Field(default=None, ge=1)
@@ -170,7 +172,8 @@ def report(ident: str, x_project_id: str = Header(min_length=1), offset: int = Q
     experiment = public(service.storage.get('experiments', x_project_id, ident))
     samples = service.page('samples', x_project_id, filters={'evaluation_id': ident}, offset=offset, limit=limit)
     from evaluation_backend.aspects import aspect_results
-    return {**aspect_results(service, x_project_id, ident), 'evaluation_id': ident, 'status': experiment['status'], 'experiment': experiment,
+    from evaluation_backend.guardrail_report import guardrail_report
+    return {**guardrail_report(service, x_project_id, ident), **aspect_results(service, x_project_id, ident), 'evaluation_id': ident, 'status': experiment['status'], 'experiment': experiment,
             'datasets': service.dataset_summary(x_project_id, ident, experiment),
             'results': samples['items'], 'total': samples['total'], 'offset': offset, 'limit': limit,
             'partial': experiment['status'] == 'RUNNING',

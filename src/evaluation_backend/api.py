@@ -64,6 +64,8 @@ def create_app() -> FastAPI:
     app.include_router(target_configs_router)
     from evaluation_backend.targets import router as targets_router
     app.include_router(targets_router)
+    from evaluation_backend.guardrail_runs import router as guardrail_router
+    app.include_router(guardrail_router)
 
     @app.exception_handler(StorageError)
     async def storage_error(request, error):

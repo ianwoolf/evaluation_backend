@@ -37,6 +37,8 @@ metadata:
   namespace: evaluation
 data:
   EVAL_LOG_LEVEL: INFO
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://127.0.0.1:18091/v1/traces
+  OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/protobuf
   # Optional external OTLP HTTP/protobuf logs receiver:
   # OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: http://otel-collector:4318/v1/logs
   # OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: http/protobuf
@@ -47,13 +49,18 @@ metadata:
   name: evaluation-api-config
   namespace: evaluation
 data:
+  EVAL_MOCK_GUARDRAIL_ID: mock-guardrail
+  EVAL_MOCK_GUARDRAIL_URL: http://evaluation-mock-guardrail:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans
   EVAL_SCORING_ENABLED: 'true'
   EVAL_REPORT_REFLECTION_ENABLED: 'false'
   EVAL_AUTH_MODE: none
   EVAL_DEFAULT_PROJECT_ID: individual
   EVAL_EXECUTION_BACKEND: kubernetes
   EVAL_MODEL_REGISTRY: /config/models.json
-  EVAL_WORKER_IMAGE: evaluation-worker:compact-workbench-20261101
+  EVAL_GIT_SSH_SECRET_NAME: evaluation-git-ssh
+  EVAL_GIT_SSH_SECRET_KEY: ssh-privatekey
+  EVAL_GIT_SSH_KNOWN_HOSTS_CONFIGMAP: evaluation-git-known-hosts
+  EVAL_WORKER_IMAGE: evaluation-worker:otel-traces-20261103
   EVAL_UPLOAD_DIR: /uploads
   EVAL_CONTENT_POLICY: '{"input":"retain","response":"retain","reference":"retain"}'
 ---
@@ -97,7 +104,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: evaluation-worker:compact-workbench-20261101
+        image: evaluation-worker:otel-traces-20261103
         imagePullPolicy: IfNotPresent
         command:
         - python
@@ -111,6 +118,13 @@ spec:
         - --no-access-log
         ports:
         - containerPort: 8001
+        env:
+        - name: EVAL_MOCK_GUARDRAIL_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: evaluation-mock-guardrail
+              key: token
+              optional: true
         envFrom:
         - configMapRef:
             name: evaluation-api-config

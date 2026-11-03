@@ -1,12 +1,13 @@
 """Runner-local collector: OTLP/HTTP JSON and typed evaluation feedback to storage.
 
 This is a Python collector service, not the upstream Collector distribution.
-OTLP protobuf/gRPC are intentionally not advertised.
+OTLP HTTP JSON and protobuf are accepted; gRPC is not supported.
 """
 import os
 from contextlib import asynccontextmanager
 from evaluation_backend.observability import configure_logging, event, instrument_app, shutdown_logging
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import Response
 from fastapi.responses import JSONResponse
 from evaluation_backend.runs import authorize
 from evaluation_backend.content_policy import ContentPolicy
@@ -57,7 +58,26 @@ def create_collector():
         return {'status': 'ok'}
 
     @app.post('/v1/traces', dependencies=[Depends(authorize)])
-    def traces(value: dict, service=Depends(get_service)):
+    async def traces(request: Request, service=Depends(get_service)):
+        body=await request.body()
+        if len(body)>4_000_000: raise HTTPException(413,'Trace batch exceeds 4 MB')
+        protobuf=request.headers.get('content-type','').split(';')[0]=='application/x-protobuf'
+        try:
+            if protobuf:
+                from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+                from google.protobuf.json_format import MessageToDict
+                import base64
+                message=ExportTraceServiceRequest();message.ParseFromString(body)
+                value=MessageToDict(message)
+                for resource in value.get('resourceSpans',[]):
+                    for scope in resource.get('scopeSpans',[]):
+                        for item in scope.get('spans',[]):
+                            for key in ('traceId','spanId','parentSpanId'):
+                                if key in item:item[key]=base64.b64decode(item[key]).hex()
+            else:
+                import json
+                value=json.loads(body)
+        except Exception: raise HTTPException(422,'Invalid OTLP trace payload') from None
         project = os.environ['EVAL_PROJECT_ID']
         evaluation = os.environ['EXPERIMENT_ID']
         resources = value.get('resourceSpans')
@@ -72,8 +92,9 @@ def create_collector():
                     ident = f'{evaluation}:{trace_id}:{span_id}'
                     service.storage.put('traces', project, ident, {'id': ident,
                         'evaluation_id': evaluation, **trace_target(service, project, evaluation), 'created_at': now(), 'name': 'Execution trace' if policy.restricted else span.get('name', 'span'),
+                        'sample_id': next((a.get('value',{}).get('stringValue') for a in span.get('attributes',[]) if a.get('key')=='evaluation.sample_id'),None),
                         'data': policy.trace_data({'span': span, 'resource': resource.get('resource', {}), 'scope': scope.get('scope', {})})})
-        return {}
+        return Response(content=b'',media_type='application/x-protobuf') if protobuf else {}
 
     instrument_app(app)
     return app

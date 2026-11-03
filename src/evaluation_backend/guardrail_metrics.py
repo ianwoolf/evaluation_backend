@@ -1,0 +1,54 @@
+"""Binding-specific binary classification statistics, independent of UI pagination."""
+import math
+
+
+def summarize_requests(requests, bindings):
+    groups = {b['binding_id']: {**b, 'TP': 0, 'FP': 0, 'TN': 0, 'FN': 0,
+              'errors': 0, 'processed': 0, 'latencies': [], 'cost': 0.0} for b in bindings}
+    seen = set()
+    for request in requests:
+        # Persistence is an upsert; this guard also avoids duplicate delivery counting.
+        key = request['request_id']
+        if key in seen:
+            continue
+        seen.add(key)
+        for ident in request['binding_ids']:
+            if ident not in groups:
+                raise ValueError('Unknown request binding')
+            g = groups[ident]
+            g['processed'] += 1
+            if request.get('http_status') is not None or request.get('sent', False):
+                latency = request['guardrail_latency_ms']
+                if type(latency) not in (float, int) or not math.isfinite(latency) or latency < 0:
+                    raise ValueError('Invalid Guardrail latency')
+                g['latencies'].append(latency)
+            g['cost'] += request.get('cost', {}).get('amount', 0)
+            values = [c for c in request.get('classifications', []) if c['binding_id'] == ident]
+            if request['status'] == 'ERROR' or not values:
+                g['errors'] += 1
+            else:
+                if len(values) != 1:
+                    raise ValueError('Duplicate binding classification')
+                g[values[0]['outcome']] += 1
+    result = []
+    def ratio(a, b):
+        return a / b if b else None
+    def percentile(values, p):
+        if not values:
+            return None
+        # Nearest-rank percentile; stable for small acceptance datasets.
+        return sorted(values)[max(0, math.ceil(p * len(values)) - 1)]
+    for g in groups.values():
+        tp, fp, tn, fn = [g[k] for k in ('TP', 'FP', 'TN', 'FN')]
+        valid = tp + fp + tn + fn
+        times = g.pop('latencies')
+        amount = g.pop('cost')
+        result.append({**g, 'valid_count': valid, 'pending': max(0, g.get('sample_count', 0)-g['processed']),
+            'accuracy': ratio(tp+tn, valid), 'precision': ratio(tp, tp+fp),
+            'recall': ratio(tp, tp+fn), 'f1': ratio(2*tp, 2*tp+fp+fn),
+            'fpr': ratio(fp, fp+tn), 'fnr': ratio(fn, fn+tp),
+            'coverage': ratio(valid, g['processed']),
+            'latency': {'average_ms': ratio(sum(times), len(times)),
+                        'p50_ms': percentile(times, .5), 'p95_ms': percentile(times, .95)},
+            'cost': {'amount': amount, 'currency': 'USD', 'source': 'mock'}})
+    return result

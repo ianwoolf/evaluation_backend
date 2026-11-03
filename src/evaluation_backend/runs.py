@@ -45,6 +45,7 @@ class DatasetSelection(BaseModel):
 
 class StartRun(BaseModel):
     model_config = ConfigDict(extra='forbid')
+    execution_mode: Literal['legacy', 'guardrail'] = 'legacy'
     name: str = Field(default="", max_length=200)
     target_id: str
     dataset_id: str
@@ -197,9 +198,14 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     versions = [service.dataset_version(x_project_id, s.dataset_id, s.dataset_version) for s in selections]
     version = versions[0]
     from evaluation_backend.scorer_selection import resolve_scorers
+    if request.execution_mode == 'guardrail':
+        from evaluation_backend.guardrail_runs import resolve_bindings
+        guardrail_bindings = resolve_bindings(service, x_project_id, target, environment, selections, versions)
+    else:
+        guardrail_bindings = []
     try:
-        bindings = [resolve_scorers(selected.dataset_id, content, selection=request.scorer_selection,
-                    mode=request.scoring_mode, shared=request.scorer_ids, service=service, project=x_project_id) for selected, content in zip(selections, versions)]
+        bindings = ([{'scorer_ids': [b['scorer_id']], 'scorer_metadata': {}} for b in guardrail_bindings] if guardrail_bindings else [resolve_scorers(selected.dataset_id, content, selection=request.scorer_selection,
+                    mode=request.scoring_mode, shared=request.scorer_ids, service=service, project=x_project_id) for selected, content in zip(selections, versions)])
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
     dataset_records = []
@@ -229,6 +235,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
                    environment_version=request.environment_version, scorer_ids=request.scorer_ids,
                    scoring_mode=request.scoring_mode, total_samples=count,
                    created_at=datetime.now(timezone.utc).isoformat())
+    context['execution_mode'] = request.execution_mode
+    context['guardrail_bindings'] = guardrail_bindings
     context['scoring_selections'] = dataset_records
     if request.datasets is not None or request.scorer_selection == 'dataset':
         context['datasets'] = dataset_records
@@ -271,6 +279,10 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         {'name': 'EVAL_GUARDRAIL_ID', 'value': environment['guardrailId']},
         {'name': 'EVAL_ENVIRONMENT_SNAPSHOT', 'value': json.dumps({**environment, 'id': request.environment_id})},
         {'name': 'EVAL_CONTENT_POLICY', 'value': json.dumps(context['content_policy'])}])
+    if request.execution_mode == 'guardrail':
+        container = job['spec']['template']['spec']['containers'][0]
+        container['command'] = ['python', '-m', 'evaluation_backend.proxy_entrypoint', '--', 'python', '-m', 'evaluation_backend.guardrail_worker']
+        container['env'].append({'name': 'EVAL_LLM_PROXY_ENABLED', 'value': 'false'})
     # Retain runs for history; explicit cleanup can be configured by operators.
     job['spec'].pop('ttlSecondsAfterFinished', None)
     try:

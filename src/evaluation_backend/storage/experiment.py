@@ -1,3 +1,4 @@
+from evaluation_backend import tracing
 """Platform-independent target/scorer execution with per-sample durable feedback."""
 from evaluation_backend.observability import observed
 from copy import deepcopy
@@ -90,44 +91,49 @@ class StoredExperiment:
             result = {'id': f'{self.sample_prefix}sample-{index:08d}', 'dataset_id': dataset.id,
                       'dataset_version': self.version, 'input': value, 'reference': reference, 'output': {},
                       'status': 'ERROR', 'error': None, 'scores': [], 'trace': [], 'costUsd': 0, 'modelLatencyMs': 0}
-            started = time.perf_counter()
-            stage, scorer_id = 'target', None
-            event('sample.started', run_id=settings.evaluation_id, sample_id=result['id'])
-            try:
-                if os.getenv('EVAL_MODEL_ID') == 'none':
-                    result['output'] = deepcopy(value)
-                else:
-                    before = time.perf_counter()
-                    try:
-                        with operation('target.execute', run_id=settings.evaluation_id, sample_id=result['id']):
-                            result['output'] = target(value)
-                    finally:
-                        result['modelLatencyMs'] = (time.perf_counter() - before) * 1000
+            with tracing.span('evaluation.request',{'evaluation.sample_id':result['id'],'evaluation.dataset_id':result['dataset_id']}) as request_span:
+                started = time.perf_counter()
+                stage, scorer_id = 'target', None
+                event('sample.started', run_id=settings.evaluation_id, sample_id=result['id'])
+                try:
+                    if os.getenv('EVAL_MODEL_ID') == 'none':
+                        result['output'] = deepcopy(value)
+                    else:
+                        before = time.perf_counter()
+                        try:
+                            with operation('target.execute', run_id=settings.evaluation_id, sample_id=result['id']), tracing.span('target.execute',{'evaluation.sample_id':result['id']}) as target_span:
+                                tracing.payload(target_span,'input',value)
+                                result['output'] = target(value)
+                                tracing.payload(target_span,'output',result['output'])
+                        finally:
+                            result['modelLatencyMs'] = (time.perf_counter() - before) * 1000
+                        if not isinstance(result['output'], dict):
+                            raise ValueError('Target must return an object')
+                        result['trace'].append({'name': 'Target', 'kind': 'GUARDRAIL',
+                            'durationMs': result['modelLatencyMs'], 'detail': 'Target completed'})
+                    for scorer in scorers:
+                        stage, scorer_id = 'scorer', scorer.id
+                        before = time.perf_counter()
+                        with operation('scorer.execute', run_id=settings.evaluation_id, sample_id=result['id'], scorer_id=scorer.id), tracing.span('scorer.evaluate',{'evaluation.scorer_id':scorer.id,'evaluation.sample_id':result['id']}):
+                            score = scorer.evaluate(input=value, output=result['output'], reference=reference, metadata=metadata)
+                        if not isinstance(score, Score):
+                            raise ValueError('Scorer must return Score')
+                        result['scores'].append({'scorerId': scorer.id, 'scorerVersion': scorer.version,
+                            'source': 'mock' if scorer.version in ('demo-v1', 'mock-v1') else 'real',
+                            'value': score.value, 'passed': score.value >= scorer.threshold, 'reason': score.reason})
+                        result['trace'].append({'name': scorer.id, 'kind': 'SCORER',
+                            'durationMs': (time.perf_counter() - before) * 1000, 'detail': score.reason})
+                    result['status'] = 'PASS' if all(s['passed'] for s in result['scores']) else 'FAIL'
+                except Exception as error:
+                    event('sample.failed', level='ERROR', error=error, run_id=settings.evaluation_id,
+                          sample_id=result['id'], phase=stage, scorer_id=scorer_id)
+                    # Do not persist exception strings which may contain auth headers.
+                    result['error'] = type(error).__name__
+                    from opentelemetry.trace import Status,StatusCode
+                    request_span.set_status(Status(StatusCode.ERROR,type(error).__name__))
                     if not isinstance(result['output'], dict):
-                        raise ValueError('Target must return an object')
-                    result['trace'].append({'name': 'Target', 'kind': 'GUARDRAIL',
-                        'durationMs': result['modelLatencyMs'], 'detail': 'Target completed'})
-                for scorer in scorers:
-                    stage, scorer_id = 'scorer', scorer.id
-                    before = time.perf_counter()
-                    with operation('scorer.execute', run_id=settings.evaluation_id, sample_id=result['id'], scorer_id=scorer.id):
-                        score = scorer.evaluate(input=value, output=result['output'], reference=reference, metadata=metadata)
-                    if not isinstance(score, Score):
-                        raise ValueError('Scorer must return Score')
-                    result['scores'].append({'scorerId': scorer.id, 'scorerVersion': scorer.version,
-                        'source': 'mock' if scorer.version in ('demo-v1', 'mock-v1') else 'real',
-                        'value': score.value, 'passed': score.value >= scorer.threshold, 'reason': score.reason})
-                    result['trace'].append({'name': scorer.id, 'kind': 'SCORER',
-                        'durationMs': (time.perf_counter() - before) * 1000, 'detail': score.reason})
-                result['status'] = 'PASS' if all(s['passed'] for s in result['scores']) else 'FAIL'
-            except Exception as error:
-                event('sample.failed', level='ERROR', error=error, run_id=settings.evaluation_id,
-                      sample_id=result['id'], phase=stage, scorer_id=scorer_id)
-                # Do not persist exception strings which may contain auth headers.
-                result['error'] = type(error).__name__
-                if not isinstance(result['output'], dict):
-                    result['output'] = {}
-            result['latencyMs'] = (time.perf_counter() - started) * 1000
+                        result['output'] = {}
+                result['latencyMs'] = (time.perf_counter() - started) * 1000
             # Persistence errors propagate and fail the Job instead of losing results silently.
             with log_context(run_id=settings.evaluation_id, sample_id=result['id']):
                 self.client.sample(settings.evaluation_id, result)

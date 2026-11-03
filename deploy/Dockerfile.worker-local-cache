@@ -1,6 +1,6 @@
 FROM ianwoolf/evaluation-worker:2.2
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates jq procps iproute2 dnsutils netcat-openbsd && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git openssh-client curl ca-certificates jq procps iproute2 dnsutils netcat-openbsd && rm -rf /var/lib/apt/lists/*
 ENV DEEPEVAL_TELEMETRY_OPT_OUT=YES
 RUN pip install --no-cache-dir deepeval==4.3.2
 COPY src/ /app/src/

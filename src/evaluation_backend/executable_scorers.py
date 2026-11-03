@@ -48,7 +48,11 @@ class Judge(BaseModel):
         return self
 Execution=Annotated[Rule|Judge,Field(discriminator='engine')]
 ADAPTER=TypeAdapter(Execution)
-def validate_execution(value):return ADAPTER.validate_python(value).model_dump(exclude_unset=True)
+def validate_execution(value):
+    if value.get('engine') == 'git':
+        from evaluation_backend.git_scorers import GitExecution
+        return GitExecution.model_validate(value).model_dump()
+    return ADAPTER.validate_python(value).model_dump(exclude_unset=True)
 
 def lookup(envelope,path):
     value=envelope
@@ -79,6 +83,12 @@ def judge_complete(model_id,messages,timeout):
     except Exception:raise RuntimeError('Judge model invocation failed') from None
 
 def evaluate_execution(config,envelope,judge=judge_complete):
+    if config.get('engine') == 'git':
+        from evaluation_backend.git_scorers import execute
+        value = execute(config,envelope)
+        if not isinstance(value,dict) or type(value.get('score')) not in (int,float) or not math.isfinite(value['score']) or not 0 <= value['score'] <= 1 or not isinstance(value.get('reason'),str):
+            raise ValueError('Git scorer must return score in [0,1] and reason')
+        return Score(float(value['score']),value['reason'][:8000])
     c=ADAPTER.validate_python(config)
     if isinstance(c,Rule):
         actual=lookup(envelope,c.actual);expected=lookup(envelope,c.expected_path) if c.expected_path else c.literal

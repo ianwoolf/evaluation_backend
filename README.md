@@ -332,3 +332,38 @@ covers every stored sample, independently of the report's `offset` / `limit`.
 Pass rate uses processed samples including errors; an unprocessed dataset has
 null metrics. Running results are provisional. The UI displays this comparison
 and filters sample details by dataset; exported reports include both.
+
+
+### Git scorer execution
+
+CODE scorers use `execution.engine = "git"`, an HTTPS or SSH `repo_url`, a full 40-character `commit`, a repository-relative Python `script_path`, and `timeout` (1–120 seconds). Overview repository/script must match execution. The validation action fetches the pinned commit and checks the script exists; it does not execute user scripts on the API. Publishing repeats source validation. The test action rejects Git execution on the API: trigger a runner evaluation instead.
+
+Each runner fetches the pinned commit into a temporary checkout, verifies HEAD and script containment, and reuses the checkout for all samples using that source during the process. Each sample invokes `python -I script.py` with one JSON object on stdin and expects one JSON object on stdout. The script has a clean environment without inherited API/Guardrail/collector credentials and a per-call timeout. Temporary checkouts are cleaned on process exit. There is no separate scorer HTTP service or artifact registry. Git must be installed in API and worker images; SSH workers also require openssh-client. Git fetch has a 90-second timeout per command.
+
+For ordinary scoring the JSON result contains `score` (finite number 0–1) and `reason`. For direct Guardrail scoring input contains `input`, normalized `label`, `strategy`, and Scan `output`; result contains `expected`, `predicted`, quadrant `outcome` (TP/FP/TN/FN), and `reason`. See `examples/guardrail-scorer/scorer.py`. Dependencies must already exist in the worker image; automatic pip installation is not implemented. SSH private repositories use the runner Secret configuration below. Only trusted scripts should run in this worker: a clean subprocess environment is not a hostile-code sandbox.
+
+The Mock fixture uses `local-fixture://guardrail-scorer-git`, resolved to `EVAL_GIT_FIXTURE_URL` (default `http://evaluation-scorer-git:8080/scorer.git`). `deploy/kubernetes/guardrail-git-source.yaml` serves a read-only bare Git repository, not scoring HTTP endpoints. Legacy v1 fixture bindings obtain their fixed commit from `EVAL_GUARDRAIL_SCORER_COMMIT` and execute through the same runner path. `EVAL_GIT_SCORER_ARTIFACTS` and `EVAL_GUARDRAIL_SCORER_URL` are no longer used.
+
+
+### Runner SSH key configuration (Kubernetes)
+
+In the API ConfigMap `evaluation-api-config`, set references only:
+
+```yaml
+EVAL_GIT_SSH_SECRET_NAME: evaluation-git-ssh
+EVAL_GIT_SSH_SECRET_KEY: ssh-privatekey
+EVAL_GIT_SSH_KNOWN_HOSTS_CONFIGMAP: evaluation-git-known-hosts
+```
+
+The API creates runner Jobs with a read-only Secret volume for the selected private-key entry and a read-only ConfigMap volume for `known_hosts`. The API itself does not mount the private key. All three references must be set together. SSH validation on the API validates configuration only and reports `checkout_validation: runner`; repository authentication, commit and entry validation happen when the runner fetches. Restart the API after updating its ConfigMap.
+
+Create the Secret from a local file and the non-secret host-key ConfigMap from a trusted known_hosts file:
+
+```bash
+kubectl -n evaluation create secret generic evaluation-git-ssh --from-file=ssh-privatekey=.test/test_rsa
+kubectl -n evaluation create configmap evaluation-git-known-hosts --from-file=known_hosts=/path/to/trusted/known_hosts
+```
+
+Supported URLs: `git@github.com:ianwoolf/evaluation_backend.git` or `ssh://git@github.com/ianwoolf/evaluation_backend.git`. The worker copies the projected key to a temporary file with mode 0600 for Git SSH, uses IdentitiesOnly/BatchMode and StrictHostKeyChecking=yes, and deletes the copy after checkout. It does not pass SSH credential environment settings to the scorer subprocess. This implementation supports non-interactive, unencrypted keys; encrypted-key passphrases/SSH agents are not configured. The key must be authorized on the Git server and trusted host entries must match the SSH hostname/port.
+
+Test source branch: `codex/git-scorer-ssh-fixture`; pinned commit `04d17e4876856417a801b500d23507976d4aafc4`; script `scripts/git-scorer-fixtures/scan_classification.py`. Local `.test/test_rsa` and `.test/test_rsa.pub` are explicitly excluded by Git and Docker build contexts. Never copy either key into an image or ConfigMap.

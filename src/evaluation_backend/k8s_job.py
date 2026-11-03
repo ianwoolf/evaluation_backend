@@ -1,4 +1,5 @@
 """Render or submit a direct Kubernetes evaluation Job (not an OpenShell sandbox)."""
+import os
 import argparse
 import json
 import yaml
@@ -32,7 +33,7 @@ def build_job(dataset_id, model_id, scorer_ids, *, namespace='evaluation', image
     values = {'EXPERIMENT_ID': ident, 'EVALUATE_ID': ident, 'EVALUATION_ID': ident,
               'DATASET_ID': dataset_id, 'EVAL_MODEL_ID': model_id, 'SCORER_IDS': json.dumps(scorer_ids),
               'EVAL_TARGET_MODE': 'llm', 'EVAL_SCORER_MODE': 'mock' if mock else 'installed'}
-    return {'apiVersion': 'batch/v1', 'kind': 'Job',
+    job = {'apiVersion': 'batch/v1', 'kind': 'Job',
             'metadata': {'name': 'eval-' + uuid.uuid4().hex[:20], 'namespace': namespace, 'labels': labels},
             'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 600, 'ttlSecondsAfterFinished': 86400,
                      'template': {'metadata': {'labels': labels}, 'spec': {
@@ -52,6 +53,26 @@ def build_job(dataset_id, model_id, scorer_ids, *, namespace='evaluation', image
                              'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True, 'capabilities': {'drop': ['ALL']}},
                              'volumeMounts': [{'name': 'tmp', 'mountPath': '/tmp'}, {'name': 'home', 'mountPath': '/home/worker'}]}],
                          'volumes': [{'name': 'tmp', 'emptyDir': {'sizeLimit': '128Mi'}}, {'name': 'home', 'emptyDir': {'sizeLimit': '128Mi'}}]}}}}
+    secret = os.getenv('EVAL_GIT_SSH_SECRET_NAME','')
+    key = os.getenv('EVAL_GIT_SSH_SECRET_KEY','')
+    hosts = os.getenv('EVAL_GIT_SSH_KNOWN_HOSTS_CONFIGMAP','')
+    if any((secret,key,hosts)):
+        if not all((secret,key,hosts)):
+            raise ValueError('Configure Git SSH Secret name/key and known_hosts ConfigMap together')
+        if not all(re.fullmatch(r'[a-z0-9]([-a-z0-9.]*[a-z0-9])?',n) for n in (secret,hosts)) or not re.fullmatch(r'[A-Za-z0-9_.-]+',key):
+            raise ValueError('Invalid Git SSH Secret/ConfigMap reference')
+        pod=job['spec']['template']['spec'];worker=pod['containers'][0]
+        pod['volumes'].extend([
+            {'name':'git-ssh-key','secret':{'secretName':secret,'defaultMode':0o440,'items':[{'key':key,'path':'private-key'}]}},
+            {'name':'git-ssh-hosts','configMap':{'name':hosts,'items':[{'key':'known_hosts','path':'known_hosts'}]}}])
+        worker['volumeMounts'].extend([
+            {'name':'git-ssh-key','mountPath':'/var/run/evaluation/git-key','readOnly':True},
+            {'name':'git-ssh-hosts','mountPath':'/var/run/evaluation/git-hosts','readOnly':True}])
+        worker['env'].extend([
+            {'name':'EVAL_GIT_SSH_KEY_FILE','value':'/var/run/evaluation/git-key/private-key'},
+            {'name':'EVAL_GIT_SSH_KNOWN_HOSTS_FILE','value':'/var/run/evaluation/git-hosts/known_hosts'}])
+    return job
+
 
 
 def main():

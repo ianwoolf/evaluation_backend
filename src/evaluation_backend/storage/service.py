@@ -5,7 +5,8 @@ from functools import lru_cache
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, model_serializer
+from evaluation_backend.guardrail_contracts import GuardrailDatasetConfig, validate_guardrail_rows
 
 from . import Conflict, NotFound, Storage
 
@@ -20,10 +21,13 @@ class DatasetField(BaseModel):
 
 class DatasetContent(BaseModel):
     model_config = ConfigDict(extra='forbid')
+    evaluation_type: Literal['generic', 'guardrail'] = 'generic'
+    guardrail: GuardrailDatasetConfig | None = None
     name: str = Field(min_length=1)
     objective: str = Field(min_length=1)
     description: str = ''
     tags: list[str] = Field(default_factory=list)
+    targets: list[str] = Field(default_factory=list)
     scorerIds: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     fields: list[DatasetField] = Field(min_length=1)
@@ -31,6 +35,14 @@ class DatasetContent(BaseModel):
 
     @model_validator(mode='after')
     def validate_fields(self):
+        if self.evaluation_type == 'guardrail':
+            if self.guardrail is None:
+                raise ValueError('Guardrail datasets require scorer/aspect configuration')
+            validate_guardrail_rows(self.fields, self.rows, self.guardrail)
+            if self.scorerIds != [self.guardrail.scorer_id]:
+                raise ValueError('Guardrail scorerIds must match the default scorer')
+        elif self.guardrail is not None:
+            raise ValueError('Guardrail configuration requires evaluation_type=guardrail')
         names = [f.name for f in self.fields]
         if len(names) != len(set(names)) or not any(f.role == 'input' for f in self.fields):
             raise ValueError('Dataset requires unique field names and at least one input field')
@@ -39,6 +51,16 @@ class DatasetContent(BaseModel):
                 if field.required and (field.name not in row or row[field.name] is None):
                     raise ValueError('Missing required dataset field: ' + field.name)
         return self
+
+    @model_serializer(mode='wrap')
+    def preserve_generic_wire_format(self, handler):
+        value = handler(self)
+        if not self.targets:
+            value.pop("targets", None)
+        if self.evaluation_type == 'generic':
+            value.pop('evaluation_type', None)
+            value.pop('guardrail', None)
+        return value
 
 
 class DatasetVersion(DatasetContent):

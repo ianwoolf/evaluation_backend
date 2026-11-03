@@ -34,7 +34,10 @@ class ScorerConfig(BaseModel):
         if self.execution is not None:
             from evaluation_backend.executable_scorers import validate_execution
             self.execution=validate_execution(self.execution)
-            if self.kind != {"rule":"RULE","llm_judge":"LLM_JUDGE"}[self.execution["engine"]]:raise ValueError("Engine/type mismatch")
+            if self.kind != {"rule":"RULE","llm_judge":"LLM_JUDGE","git":"CODE"}[self.execution["engine"]]:raise ValueError("Engine/type mismatch")
+        if self.execution and self.execution['engine'] == 'git':
+            if self.repoUrl != self.execution['repo_url'] or self.scriptPath != self.execution['script_path']:
+                raise ValueError('Git source must match execution repository and script')
         return self
 
 class Version(ScorerConfig):
@@ -76,11 +79,13 @@ def save(ident: str, value: Document, x_project_id: str = Header(min_length=1), 
     data = value.model_dump(mode='json', exclude_none=True, exclude_unset=True, exclude={'revision'})
     try: current = service.storage.get('scorers', x_project_id, ident)
     except NotFound:
+        verify_git_versions(data['versions'])
         return public(service.storage.put('scorers', x_project_id, ident, data, create=True))
     if value.revision != current['_revision']: raise Conflict('Scorer changed; reload before saving')
     old = current['versions']
     if data['versions'][:len(old)] != old or len(data['versions']) > len(old)+1:
         raise Conflict('Published versions are immutable; append one at a time')
+    verify_git_versions(data['versions'][len(old):])
     return public(service.storage.put('scorers', x_project_id, ident, data, revision=value.revision))
 
 class TestRequest(BaseModel):
@@ -90,6 +95,10 @@ class TestRequest(BaseModel):
 @router.post('/actions/validate')
 def validate(value: ScorerConfig):
     if not value.execution:raise HTTPException(422,'Configure an execution engine')
+    if value.execution['engine'] == 'git':
+        from evaluation_backend.git_scorers import verify
+        try: return verify(value.execution)
+        except ValueError as error: raise HTTPException(422,str(error)) from None
     return {'valid':True,'execution':value.execution}
 
 @router.post('/actions/test')
@@ -99,9 +108,18 @@ def test(value: TestRequest):
     from evaluation_backend.capabilities import scoring_enabled
     if len(value.model_dump_json().encode())>256_000:raise HTTPException(413,'Test evidence exceeds 256 KB')
     if not value.config.execution:raise HTTPException(422,'Configure an execution engine')
+    if value.config.execution['engine']=='git':raise HTTPException(422,'Git scripts execute only in the runner; trigger an evaluation to test')
     if not scoring_enabled():return {'source':'mock','score':.5,'passed':.5>=value.config.threshold,'reason':'Demo score; no engine or model called'}
     started=time.perf_counter()
     try:score=evaluate_execution(value.config.execution,value.evidence)
     except ValueError as error:raise HTTPException(422,str(error)) from None
     except Exception:raise HTTPException(502,'Scorer execution failed; check runner/API logs') from None
     return {'source':'real','score':score.value,'passed':score.value>=value.config.threshold,'reason':score.reason,'duration_ms':round((time.perf_counter()-started)*1000), 'engine':value.config.execution['engine']}
+
+
+def verify_git_versions(versions):
+    from evaluation_backend.git_scorers import verify
+    for spec in versions:
+        if spec.get('execution',{}).get('engine') == 'git':
+            try: verify(spec['execution'])
+            except ValueError as error: raise HTTPException(422,str(error)) from None

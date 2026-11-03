@@ -29,6 +29,12 @@ class ContentPolicy(BaseModel):
         for field, mode in [('input', self.input), ('output', self.response), ('reference', self.reference)]:
             if mode == 'omit': result[field] = {}
         if self.restricted:
+            if result.get('guardrail_result'):
+                g = result['guardrail_result']
+                g['classifications'] = [{**c, 'reason': ''} for c in g.get('classifications', [])]
+                if self.reference == 'omit':
+                    # Preserve aggregate classification evidence, not source label spelling.
+                    g['strategy'] = ''
             result['error'] = 'Sample execution failed' if result.get('error') else None
             result['scores'] = [{**{k: s[k] for k in ('scorerId', 'scorerVersion', 'value', 'passed') if k in s}, 'reason': ''} for s in result.get('scores', [])]
             result['trace'] = [{'name': 'Execution step', 'kind': s.get('kind', 'SCORER'), 'durationMs': s.get('durationMs', 0), 'detail': ''} for s in result.get('trace', [])]

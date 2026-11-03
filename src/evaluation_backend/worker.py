@@ -1,3 +1,4 @@
+from evaluation_backend import tracing
 """Sandbox entry point; reads IDs and configuration from environment."""
 import argparse
 import json
@@ -50,6 +51,7 @@ def main():
             parser.error('invalid environment file')
         os.environ.update(values)
     configure_logging('evaluation-worker')
+    tracing.configure()
     event('worker.started')
     if os.getenv('EVAL_LLM_PROXY_ENABLED', '').lower() == 'true' and not os.getenv('OPENAI_BASE_URL'):
         import subprocess
@@ -109,6 +111,7 @@ def main():
         event('worker.failed', level='ERROR', error=error, status='FAILED')
         return 1
     finally:
+        tracing.shutdown()
         shutdown_logging()
 
 
@@ -119,5 +122,6 @@ if __name__ == '__main__':
         event('worker.startup.failed', level='ERROR', error=error)
         code = 1
     finally:
+        tracing.shutdown()
         shutdown_logging()
     raise SystemExit(code)
