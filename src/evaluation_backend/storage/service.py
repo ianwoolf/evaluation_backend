@@ -36,10 +36,8 @@ class DatasetContent(BaseModel):
     @model_validator(mode='after')
     def validate_fields(self):
         if self.evaluation_type == 'guardrail':
-            if self.guardrail is None:
-                raise ValueError('Guardrail datasets require scorer/aspect configuration')
             validate_guardrail_rows(self.fields, self.rows, self.guardrail)
-            if self.scorerIds != [self.guardrail.scorer_id]:
+            if self.guardrail is not None and self.scorerIds != [self.guardrail.scorer_id]:
                 raise ValueError('Guardrail scorerIds must match the default scorer')
         elif self.guardrail is not None:
             raise ValueError('Guardrail configuration requires evaluation_type=guardrail')

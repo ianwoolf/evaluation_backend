@@ -9,20 +9,30 @@ from evaluation_backend.storage.service import get_service, DatasetContent
 router = APIRouter(prefix='/api/v1/evaluations')
 
 
-def resolve_bindings(service, project, target, environment, selections, versions):
-    if target['id'] != os.getenv('EVAL_MOCK_GUARDRAIL_ID', 'mock-guardrail'):
-        raise HTTPException(422, 'This target has no direct Guardrail connection configured')
+def resolve_bindings(service, project, target, environment, selections, versions, configured=None):
+    if target.get('kind') != 'GUARDRAIL':
+        raise HTTPException(422, 'Direct Guardrail evaluation requires a GUARDRAIL target')
+    if (target.get('guardrail_id') or target['id']) != os.getenv('EVAL_MOCK_GUARDRAIL_ID', 'mock-guardrail'):
+        raise HTTPException(422, 'No connection configured for this Guardrail target. Set the target Guardrail ID to the configured EVAL_MOCK_GUARDRAIL_ID and configure EVAL_MOCK_GUARDRAIL_URL and EVAL_MOCK_GUARDRAIL_TOKEN.')
     if environment['modelId'] != 'none':
         raise HTTPException(422, 'Direct Guardrail evaluation requires Model: None')
     commit = os.getenv('EVAL_GUARDRAIL_SCORER_COMMIT', '')
     result = []
     for i, (selection, raw) in enumerate(zip(selections, versions)):
         content = DatasetContent.model_validate({k:v for k,v in raw.items() if k not in ('version','publishedAt')})
-        if content.evaluation_type != 'guardrail' or not content.guardrail:
+        if content.evaluation_type != 'guardrail':
             raise HTTPException(422, 'Select only Guardrail datasets for this run')
         if service.is_archived(project, 'datasets', selection.dataset_id):
             raise HTTPException(422, 'Dataset is archived')
-        config = content.guardrail
+        from evaluation_backend.guardrail_contracts import GuardrailDatasetConfig, validate_guardrail_rows
+        pinned = next((b for b in (configured or []) if b['dataset_id'] == selection.dataset_id and b['dataset_version'] == selection.dataset_version), None)
+        config = GuardrailDatasetConfig.model_validate({k:pinned[k] for k in GuardrailDatasetConfig.model_fields if k in pinned}) if pinned else content.guardrail
+        if config is None:
+            raise HTTPException(422, 'Configure a scorer and aspect for each dataset in Evaluation')
+        try: validate_guardrail_rows(content.fields, content.rows, config)
+        except ValueError as error: raise HTTPException(422, str(error)) from None
+        if service.is_archived(project, 'scorers', config.scorer_id):
+            raise HTTPException(422, 'Scorer is archived')
         doc = service.storage.get('scorers',project,config.scorer_id)
         spec = next((v for v in doc['versions'] if v['version'] == config.scorer_version),None)
         if not doc.get('enabled',True) or spec is None:
@@ -51,6 +61,7 @@ def resolve_bindings(service, project, target, environment, selections, versions
 
 class GuardrailRun(BaseModel):
     model_config = ConfigDict(extra='forbid')
+    config_revision: str = Field(min_length=1)
     name: str = Field(default='', max_length=200)
     target_id: str
     datasets: list[DatasetSelection] = Field(min_length=1, max_length=20)
@@ -63,12 +74,12 @@ def trigger(value: GuardrailRun, x_project_id: str = Header(min_length=1),
             idempotency_key: str = Header(min_length=16,max_length=128), cluster=Depends(kube),service=Depends(get_service)):
     if any(d.upload_id for d in value.datasets):
         raise HTTPException(422, 'Guardrail runs currently require published datasets')
-    first = value.datasets[0]
-    request = StartRun(execution_mode='guardrail', name=value.name,target_id=value.target_id,
-        dataset_id=first.dataset_id,dataset_version=first.dataset_version,datasets=value.datasets,
-        environment_id=value.environment_id,environment_version=value.environment_version,
-        model_id='none',scorer_ids=['guardrail-git-classifier'],scorer_selection='dataset',scoring_mode='installed',snapshot={})
-    return start(request,x_project_id,idempotency_key,cluster,service)
+    from evaluation_backend.target_configs import load_config, TriggerTarget, trigger as configured_trigger
+    config = load_config(service, x_project_id, value.target_id)
+    if config.get('execution_mode') != 'guardrail' or (config['environment_id'], config['environment_version']) != (value.environment_id, value.environment_version):
+        raise HTTPException(422, 'Use the saved Evaluation configuration and environment')
+    return configured_trigger(value.target_id, TriggerTarget(name=value.name, config_revision=value.config_revision, datasets=value.datasets), x_project_id, idempotency_key, service, cluster)
+
 
 
 @router.get('/guardrail-detail/{evaluation}')

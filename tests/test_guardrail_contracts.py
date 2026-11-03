@@ -24,7 +24,7 @@ def test_guardrail_roundtrip_and_strict_mapping():
         with pytest.raises(ValidationError):DatasetContent.model_validate(value)
 
 
-@pytest.mark.parametrize('change', ['missing-column','extra-column','wrong-role','empty-input','missing-config','scorer-mismatch'])
+@pytest.mark.parametrize('change', ['missing-column','extra-column','wrong-role','empty-input','scorer-mismatch'])
 def test_invalid_guardrail_dataset(change):
     value=content()
     if change=='missing-column':del value['rows'][0]['strategy']
@@ -72,3 +72,23 @@ def test_binding_metrics_errors_duplicates_and_null_denominators():
     assert r['f1']==.5 and r['accuracy']==.5 and r['cost']['amount']==pytest.approx(.005)
     assert r['latency']['p95_ms']==100
     assert result[1]['f1'] is None and result[1]['latency']['p95_ms'] is None
+
+
+def test_guardrail_target_id_is_configurable(monkeypatch):
+    from evaluation_backend.guardrail_runs import resolve_bindings
+    from fastapi import HTTPException
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_ID', 'gr')
+    assert resolve_bindings(None, 'p', {'id':'gr','kind':'GUARDRAIL'}, {'modelId':'none'}, [], []) == []
+    with pytest.raises(HTTPException) as error:
+        resolve_bindings(None, 'p', {'id':'other','kind':'GUARDRAIL'}, {'modelId':'none'}, [], [])
+    assert error.value.status_code == 422
+    assert 'No connection configured' in error.value.detail
+    with pytest.raises(HTTPException):
+        resolve_bindings(None, 'p', {'id':'gr','kind':'PROMPT'}, {'modelId':'none'}, [], [])
+
+
+def test_multiple_configs_share_guardrail_connection(monkeypatch):
+    from evaluation_backend.guardrail_runs import resolve_bindings
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_ID', 'mock-guardrail')
+    for ident in ('debug-gr', 'regression-gr'):
+        assert resolve_bindings(None, 'p', {'id':ident,'kind':'GUARDRAIL','guardrail_id':'mock-guardrail'}, {'modelId':'none'}, [], []) == []

@@ -36,7 +36,10 @@ def validate_guardrail_rows(fields, rows, config):
         value = row['input']
         if not ((isinstance(value, str) and value.strip()) or (isinstance(value, dict) and value)):
             raise ValueError('Guardrail input must be a nonempty string or object')
-        config.normalize_label(row['label'])
+        if config is not None:
+            config.normalize_label(row['label'])
+        elif type(row['label']) not in (str, int):
+            raise ValueError('Guardrail label must be a string or integer')
         if not isinstance(row['strategy'], str):
             raise ValueError('Guardrail strategy must be a string')
 

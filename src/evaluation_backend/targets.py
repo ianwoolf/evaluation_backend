@@ -18,6 +18,7 @@ class Target(BaseModel):
     provider: Literal['f5', 'nemo guardrail']
     version: int = Field(ge=1, strict=True)
     definition: str = Field(default='', max_length=4000)
+    guardrail_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
 
 
 def get_target(service, project, ident):
@@ -56,7 +57,7 @@ def save_target(ident: str, value: SaveTarget, x_project_id: str = Header(min_le
         raise Conflict('Target changed; reload before saving')
     if current and value.version <= current['version']:
         raise Conflict('Target version must increase when updating')
-    return public(service.storage.put('targets', x_project_id, ident, value.model_dump(exclude={'revision'}),
+    return public(service.storage.put('targets', x_project_id, ident, {**value.model_dump(exclude={'revision'}), **({'evaluation_config':current['evaluation_config']} if current and current.get('evaluation_config') else {})},
         create=current is None, revision=value.revision))
 
 

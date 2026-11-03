@@ -46,6 +46,8 @@ class DatasetSelection(BaseModel):
 class StartRun(BaseModel):
     model_config = ConfigDict(extra='forbid')
     execution_mode: Literal['legacy', 'guardrail'] = 'legacy'
+    guardrail_bindings: list[dict] | None = None
+    config_revision: str | None = None
     name: str = Field(default="", max_length=200)
     target_id: str
     dataset_id: str
@@ -189,6 +191,18 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     if request.resources is not None and request.resources != resources:
         raise HTTPException(422, 'Resources must match the stored environment version')
     target = get_target(service, x_project_id, request.target_id)
+    if service.is_archived(x_project_id, 'targets', request.target_id): raise HTTPException(422, 'Evaluation is archived')
+    if request.execution_mode == 'guardrail':
+        from evaluation_backend.target_configs import load_config, configured_datasets
+        config = load_config(service, x_project_id, request.target_id)
+        if request.config_revision != config['_revision']: raise Conflict('Evaluation configuration changed; reload before triggering')
+        if config.get('execution_mode') != 'guardrail' or (request.environment_id, request.environment_version) != (config['environment_id'], config['environment_version']):
+            raise HTTPException(422, 'Run must use the configured environment and execution mode')
+        allowed = {(d['dataset_id'],d['dataset_version']) for d in configured_datasets(config)}
+        requested = request.datasets or [DatasetSelection(dataset_id=request.dataset_id,dataset_version=request.dataset_version)]
+        if any(s.upload_id or (s.dataset_id,s.dataset_version) not in allowed for s in requested): raise HTTPException(422, 'Select only configured dataset versions')
+        request.guardrail_bindings = config.get('guardrail_bindings')
+
     selections = request.datasets or [DatasetSelection(dataset_id=request.dataset_id,
         dataset_version=request.dataset_version, upload_id=request.upload_id)]
     if len({s.dataset_id for s in selections}) != len(selections):
@@ -200,11 +214,11 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     from evaluation_backend.scorer_selection import resolve_scorers
     if request.execution_mode == 'guardrail':
         from evaluation_backend.guardrail_runs import resolve_bindings
-        guardrail_bindings = resolve_bindings(service, x_project_id, target, environment, selections, versions)
+        guardrail_bindings = resolve_bindings(service, x_project_id, target, environment, selections, versions, request.guardrail_bindings)
     else:
         guardrail_bindings = []
     try:
-        bindings = ([{'scorer_ids': [b['scorer_id']], 'scorer_metadata': {}} for b in guardrail_bindings] if guardrail_bindings else [resolve_scorers(selected.dataset_id, content, selection=request.scorer_selection,
+        bindings = ([{'scorer_ids': [b['scorer_id']], 'scorer_metadata': {'evaluation': {'scorers': {b['scorer_id']: {'version':str(b['scorer_version']), 'execution':b['scorer_execution']}}}}} for b in guardrail_bindings] if guardrail_bindings else [resolve_scorers(selected.dataset_id, content, selection=request.scorer_selection,
                     mode=request.scoring_mode, shared=request.scorer_ids, service=service, project=x_project_id) for selected, content in zip(selections, versions)])
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
