@@ -12,8 +12,8 @@ router = APIRouter(prefix='/api/v1/evaluations')
 def resolve_bindings(service, project, target, environment, selections, versions, configured=None):
     if target.get('kind') != 'GUARDRAIL':
         raise HTTPException(422, 'Direct Guardrail evaluation requires a GUARDRAIL target')
-    if (target.get('guardrail_id') or target['id']) != os.getenv('EVAL_MOCK_GUARDRAIL_ID', 'mock-guardrail'):
-        raise HTTPException(422, 'No connection configured for this Guardrail target. Set the target Guardrail ID to the configured EVAL_MOCK_GUARDRAIL_ID and configure EVAL_MOCK_GUARDRAIL_URL and EVAL_MOCK_GUARDRAIL_TOKEN.')
+    from evaluation_backend.guardrail_registry import resolve
+    resolve(target)
     if environment['modelId'] != 'none':
         raise HTTPException(422, 'Direct Guardrail evaluation requires Model: None')
     commit = os.getenv('EVAL_GUARDRAIL_SCORER_COMMIT', '')
@@ -90,6 +90,10 @@ def detail(evaluation: str, authorization: str = Header(default=''),x_project_id
     context = service.storage.get('run-contexts',x_project_id,evaluation)
     if context.get('execution_mode') != 'guardrail':
         raise HTTPException(403, 'Not a Guardrail run')
-    token = os.getenv('EVAL_MOCK_GUARDRAIL_TOKEN','')
-    if not token: raise HTTPException(503,'Guardrail credential unavailable')
-    return {'endpoint':os.environ['EVAL_MOCK_GUARDRAIL_URL'],'token':token,'source':'mock'}
+    connection=context.get('guardrail_connection')
+    if connection is None:
+        from evaluation_backend.guardrail_registry import resolve
+        connection=resolve(context['target'])
+    from evaluation_backend.guardrail_registry import credential
+    token=credential(connection)
+    return {'endpoint':connection['address'],'token':token,'source':'configured'}

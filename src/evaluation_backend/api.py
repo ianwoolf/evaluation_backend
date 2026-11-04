@@ -12,6 +12,8 @@ def create_app() -> FastAPI:
     from evaluation_backend.config import load_config
     from evaluation_backend.models import router
     load_config()
+    from evaluation_backend.guardrail_registry import registry, router as instance_router
+    registry()
     mode = os.getenv('EVAL_AUTH_MODE', 'token')
     if mode not in ('token', 'none'):
         raise ValueError('EVAL_AUTH_MODE must be token or none')
@@ -45,6 +47,7 @@ def create_app() -> FastAPI:
                                           'Idempotency-Key', 'X-Request-ID', 'traceparent'])
     instrument_app(app)
 
+    app.include_router(instance_router)
     app.include_router(router)
     from evaluation_backend.scorer_catalog import router as scorer_catalog_router
     app.include_router(scorer_catalog_router)

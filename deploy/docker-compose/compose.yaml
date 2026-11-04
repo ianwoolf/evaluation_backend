@@ -43,7 +43,9 @@ services:
       dockerfile: Dockerfile.worker
     entrypoint: [python, -m, uvicorn, 'evaluation_backend.api:app', --host, 0.0.0.0, --port, '8001', --no-access-log]
     environment:
+      EVAL_MOCK_GUARDRAIL_TOKEN_FILE: /run/secrets/guardrail_token
       EVAL_CONFIG_FILE: /config/backend.env
+      EVAL_GUARDRAIL_REGISTRY: /config/guardrails.json
       EVAL_DOCKER_NETWORK: ${EVAL_NETWORK:-evaluation-compose}
       EVAL_WORKER_IMAGE: ${EVAL_WORKER_IMAGE:-ianwoolf/evaluation-worker:2.2}
       EVAL_TRIGGER_TOKEN_FILE: /run/secrets/trigger_token
@@ -53,11 +55,13 @@ services:
       EVAL_ES_API_KEY_FILE: /run/secrets/es_api_key
       OTEL_EXPORTER_OTLP_LOGS_HEADERS_FILE: /run/secrets/otel_headers
     configs:
+      - source: guardrails
+        target: /config/guardrails.json
       - source: backend_settings
         target: /config/backend.env
       - source: models
         target: /config/models.json
-    secrets: [trigger_token, resolver_token, model_tokens, es_password, es_api_key, otel_headers]
+    secrets: [trigger_token, resolver_token, model_tokens, es_password, es_api_key, otel_headers, guardrail_token]
     group_add: ['${DOCKER_GID:-0}']
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -79,9 +83,12 @@ services:
     networks: [evaluation]
 
 configs:
+  guardrails:
+    file: ./config/guardrails.json
   backend_settings: {file: ./config/backend.env}
   models: {file: ./config/models.json}
 secrets:
+  guardrail_token: {file: ./.secrets/guardrail_token}
   trigger_token: {file: ./.secrets/trigger_token}
   resolver_token: {file: ./.secrets/resolver_token}
   model_tokens: {file: ./.secrets/model_tokens}

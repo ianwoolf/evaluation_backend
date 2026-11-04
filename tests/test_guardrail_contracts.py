@@ -78,11 +78,11 @@ def test_guardrail_target_id_is_configurable(monkeypatch):
     from evaluation_backend.guardrail_runs import resolve_bindings
     from fastapi import HTTPException
     monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_ID', 'gr')
-    assert resolve_bindings(None, 'p', {'id':'gr','kind':'GUARDRAIL'}, {'modelId':'none'}, [], []) == []
+    assert resolve_bindings(None, 'p', {'id':'gr','kind':'GUARDRAIL','provider':'f5'}, {'modelId':'none'}, [], []) == []
     with pytest.raises(HTTPException) as error:
-        resolve_bindings(None, 'p', {'id':'other','kind':'GUARDRAIL'}, {'modelId':'none'}, [], [])
+        resolve_bindings(None, 'p', {'id':'other','kind':'GUARDRAIL','provider':'f5'}, {'modelId':'none'}, [], [])
     assert error.value.status_code == 422
-    assert 'No connection configured' in error.value.detail
+    assert 'unavailable' in error.value.detail
     with pytest.raises(HTTPException):
         resolve_bindings(None, 'p', {'id':'gr','kind':'PROMPT'}, {'modelId':'none'}, [], [])
 
@@ -91,4 +91,4 @@ def test_multiple_configs_share_guardrail_connection(monkeypatch):
     from evaluation_backend.guardrail_runs import resolve_bindings
     monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_ID', 'mock-guardrail')
     for ident in ('debug-gr', 'regression-gr'):
-        assert resolve_bindings(None, 'p', {'id':ident,'kind':'GUARDRAIL','guardrail_id':'mock-guardrail'}, {'modelId':'none'}, [], []) == []
+        assert resolve_bindings(None, 'p', {'id':ident,'kind':'GUARDRAIL','provider':'f5','guardrail_id':'mock-guardrail'}, {'modelId':'none'}, [], []) == []

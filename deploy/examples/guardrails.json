@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "f5",
+      "name": "F5",
+      "instances": [
+        {
+          "id": "mock-guardrail",
+          "name": "Mock Guardrail",
+          "address": "http://evaluation-mock-guardrail:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans",
+          "enabled": true,
+          "token_env": "EVAL_MOCK_GUARDRAIL_TOKEN"
+        }
+      ]
+    },
+    {
+      "id": "nemo guardrail",
+      "name": "NeMo Guardrail",
+      "instances": [
+        {
+          "id": "mock-guardrail",
+          "name": "Mock Guardrail",
+          "address": "http://evaluation-mock-guardrail:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans",
+          "enabled": true,
+          "token_env": "EVAL_MOCK_GUARDRAIL_TOKEN"
+        }
+      ]
+    }
+  ]
+}

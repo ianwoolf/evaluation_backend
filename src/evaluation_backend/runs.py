@@ -249,6 +249,12 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
                    environment_version=request.environment_version, scorer_ids=request.scorer_ids,
                    scoring_mode=request.scoring_mode, total_samples=count,
                    created_at=datetime.now(timezone.utc).isoformat())
+    if request.execution_mode == 'guardrail':
+        from evaluation_backend.guardrail_registry import resolve
+        context['guardrail_connection'] = resolve(target)
+        if os.getenv('EVAL_GUARDRAIL_REGISTRY'):
+            from evaluation_backend.guardrail_registry import credential
+            credential(context['guardrail_connection'])
     context['execution_mode'] = request.execution_mode
     context['guardrail_bindings'] = guardrail_bindings
     context['scoring_selections'] = dataset_records

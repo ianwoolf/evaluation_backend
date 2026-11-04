@@ -45,3 +45,12 @@ No Guardrail-specific target/dataset/scorer/environment bindings have been creat
 The example scorer exists at `examples/guardrail-scorer/scorer.py`, but pinned Git artifacts and isolated execution are pending.
 The new dataset editor, Trigger and aspect report UI are not deployed. Model `none` is required by the planned direct-Guardrail flow, which is not connected yet.
 Local port 18083 is optional and is not a persistent forward established by this deployment.
+
+
+Request logs (2026-11-04): the mock writes structured JSON to stdout for each non-probe request. Events are guardrail.request.started, guardrail.request.completed and guardrail.request.failed. Fields include request_id, method, path, status_code, duration_ms, scan endpoint_id, input_chars, scan_direction, flag_only and successful outcome. Valid incoming traceparent adds trace_id and parent_span_id. X-Request-ID is returned on successes and failures; successful scan response id matches it. Authorization, token and raw request/response content are never logged. /health and /ready (including query strings) are filtered. Uvicorn access logging remains disabled to avoid duplicate/probe logs.
+
+```bash
+kubectl -n evaluation logs -f deployment/evaluation-mock-guardrail --since=10m
+```
+
+Current local image: evaluation-mock-guardrail:request-logs-20261104. No API/UI change is needed for these logs.

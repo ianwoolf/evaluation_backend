@@ -121,3 +121,8 @@ docker compose down
 
 `down` 不删除 named volumes；不要用 `down -v` 清理需要保留的数据。
 先停 UI 再停后端。重启 ES 或 API 影响不了 K8s 中独立部署的那套服务，两套数据也不共享。
+
+
+### Guardrail instance registry
+
+Set `EVAL_GUARDRAIL_REGISTRY` to the JSON registry file. Each provider owns an instance list with `id` and full endpoint `address`; optional `name`, `enabled`, `token_env` are supported. API `/api/v1/evaluations/guardrail-instances` exposes only non-secret metadata. The runner detail endpoint uses a run-scoped address snapshot and resolves credentials from the referenced environment variable or `<NAME>_FILE` Secret. K8s uses ConfigMap `evaluation-guardrails`; Compose mounts `config/guardrails.json`. Re-run Compose `init_secrets.py` for the new `guardrail_token` file and populate it with the actual endpoint token. Restart API to reload configuration.

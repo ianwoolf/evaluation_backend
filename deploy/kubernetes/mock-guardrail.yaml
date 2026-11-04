@@ -27,7 +27,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
       - name: mock-guardrail
-        image: evaluation-mock-guardrail:scan-20261102
+        image: evaluation-mock-guardrail:request-logs-20261104
         imagePullPolicy: IfNotPresent
         ports:
         - {containerPort: 8002, name: http}
