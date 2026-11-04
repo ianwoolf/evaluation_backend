@@ -54,3 +54,6 @@ kubectl -n evaluation logs -f deployment/evaluation-mock-guardrail --since=10m
 ```
 
 Current local image: evaluation-mock-guardrail:request-logs-20261104. No API/UI change is needed for these logs.
+
+
+Random behavior: EVAL_MOCK_GUARDRAIL_FLIP_RATE defaults to 0.1. The [mock:unsafe] marker remains the baseline decision, then each ordinary Scan independently flips safe/unsafe with this probability. Set 0 for deterministic fixture behavior, 1 to always invert. Mock timeout/error markers remain deterministic. Non-finite/out-of-range values return 503. ConfigMap evaluation-mock-guardrail carries the setting; restart/redeploy Mock to pick up changes. Logs include baseline_outcome, flipped and flip_rate; X-Evaluation-Mock-Flipped indicates the same flag. Small datasets may have no flips in a particular run; the rate is probabilistic, not a quota. Current local image: evaluation-mock-guardrail:random-20261104. Git scoring logic is unchanged and still classifies the actual Mock response against the dataset label. Existing reports are not rewritten.

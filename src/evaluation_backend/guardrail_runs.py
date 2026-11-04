@@ -9,11 +9,11 @@ from evaluation_backend.storage.service import get_service, DatasetContent
 router = APIRouter(prefix='/api/v1/evaluations')
 
 
-def resolve_bindings(service, project, target, environment, selections, versions, configured=None):
+def resolve_bindings(service, project, target, environment, selections, versions, configured=None, validate_connection=True):
     if target.get('kind') != 'GUARDRAIL':
         raise HTTPException(422, 'Direct Guardrail evaluation requires a GUARDRAIL target')
     from evaluation_backend.guardrail_registry import resolve
-    resolve(target)
+    if validate_connection: resolve(target)
     if environment['modelId'] != 'none':
         raise HTTPException(422, 'Direct Guardrail evaluation requires Model: None')
     commit = os.getenv('EVAL_GUARDRAIL_SCORER_COMMIT', '')
@@ -97,3 +97,26 @@ def detail(evaluation: str, authorization: str = Header(default=''),x_project_id
     from evaluation_backend.guardrail_registry import credential
     token=credential(connection)
     return {'endpoint':connection['address'],'token':token,'source':'configured'}
+
+
+@router.get('/guardrail-reports',dependencies=[Depends(authorize)])
+def reports(x_project_id:str=Header(min_length=1),service=Depends(get_service),config_id:str|None=None,config_version:int|None=None):
+    from evaluation_backend.storage import NotFound
+    items=[];cursor=0
+    while cursor<10000:
+        page=service.storage.search('run-contexts',x_project_id,offset=cursor,limit=100)
+        for context in page['items']:
+            if context.get('execution_mode')!='guardrail':continue
+            evaluation_id=context.get('evaluation_config_id',context.get('target_id'))
+            evaluation_version=context.get('evaluation_config_version',context.get('target',{}).get('version'))
+            if config_id is not None and evaluation_id!=config_id:continue
+            if config_version is not None and evaluation_version!=config_version:continue
+            try:status=service.storage.get('experiments',x_project_id,context['id']).get('status','RUNNING')
+            except NotFound:continue
+            t=context.get('target',{});c=context.get('guardrail_connection',{})
+            items.append({'id':context['id'],'name':context.get('name',context['id']),'status':status,'created_at':context.get('created_at',''),
+                          'config_id':evaluation_id,'config_version':evaluation_version,'report_id':context.get('job_name',context['id']),'guardrail_id':c.get('id',t.get('guardrail_id') or t.get('id')),'provider':c.get('provider',t.get('provider'))})
+        cursor+=len(page['items'])
+        if not page['items'] or cursor>=page['total']:break
+    items.sort(key=lambda x:x['created_at'],reverse=True)
+    return {'items':items,'total':len(items)}

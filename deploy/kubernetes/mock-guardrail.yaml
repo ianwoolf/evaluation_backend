@@ -5,6 +5,7 @@ metadata:
   namespace: evaluation
 data:
   EVAL_MOCK_GUARDRAIL_ID: mock-guardrail
+  EVAL_MOCK_GUARDRAIL_FLIP_RATE: "0.1"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -27,7 +28,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
       - name: mock-guardrail
-        image: evaluation-mock-guardrail:request-logs-20261104
+        image: evaluation-mock-guardrail:random-20261104
         imagePullPolicy: IfNotPresent
         ports:
         - {containerPort: 8002, name: http}

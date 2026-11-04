@@ -8,6 +8,7 @@ import atexit
 import shutil
 import re
 import shlex
+import threading
 from pathlib import Path
 from evaluation_backend.observability import event
 from evaluation_backend.tracing import traced
@@ -34,6 +35,7 @@ class GitExecution(BaseModel):
         return self
 
 _cache = {}
+_cache_lock = threading.RLock()
 _roots = []
 
 @atexit.register
@@ -48,8 +50,12 @@ def artifact(config):
         repo = os.getenv('EVAL_GIT_FIXTURE_URL','http://evaluation-scorer-git:8080/scorer.git')
     return c, repo
 
-@traced('git.checkout')
 def prepare(config):
+    with _cache_lock:
+        return _prepare(config)
+
+@traced('git.checkout')
+def _prepare(config):
     c, repo = artifact(config)
     key = (repo,c.commit,c.script_path)
     if key in _cache: return c,_cache[key]

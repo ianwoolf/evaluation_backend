@@ -45,7 +45,7 @@ def setup(monkeypatch):
     app = create_app()
     memory = Memory()
     memory.put("datasets", "p", "d", {"versions": [SCHEMA]})
-    memory.put('environments','p','e',{'id':'e','versions':[{'name':'Isolated','version':1,'cpuMillicores':750,'memoryMiB':768,'modelId':'glm-dev','guardrailId':'g'}]})
+    memory.put('environments','p','e',{'id':'e','versions':[{'name':'Isolated','version':1,'cpuMillicores':750,'memoryMiB':768,'modelId':'glm-dev','guardrailId':'g','runner':{'concurrency':3}}]})
     memory.put('targets','p','g',{'id':'g','name':'Guardrail','kind':'GUARDRAIL','provider':'nemo guardrail','version':2,'definition':''})
     app.dependency_overrides[get_service] = lambda: EvaluationStorageService(memory)
     app.dependency_overrides[kube] = lambda: cluster
@@ -73,6 +73,8 @@ def test_launch_idempotency_pinning_and_project_isolation(setup):
     assert cluster.created == 1
     job = cluster.saved[run['id']]
     env = {e['name']: e['value'] for e in job['spec']['template']['spec']['containers'][0]['env'] if 'value' in e}
+    assert job['spec']['parallelism'] == job['spec']['completions'] == 1
+    assert env['EVAL_CONCURRENCY'] == '3'
     assert env['DATASET_ID'] == 'd'
     assert env['EVAL_DATASET_VERSION'] == '1'
     assert env['EVAL_RUN_INPUT_ID'] == run['experiment_id']

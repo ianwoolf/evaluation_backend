@@ -61,7 +61,7 @@ def selection(project, ident, value, service, target=None):
         if len(pairs) != len(set(pairs)) or set(pairs) != {(d['dataset_id'],d['dataset_version']) for d in selected}:
             raise HTTPException(422, 'Configure exactly one scorer/aspect binding for each selected dataset')
         from evaluation_backend.guardrail_runs import resolve_bindings
-        resolve_bindings(service, project, target, environment, [DatasetSelection(**d) for d in selected], datasets, [b.model_dump() for b in value.guardrail_bindings or []])
+        resolve_bindings(service, project, target, environment, [DatasetSelection(**d) for d in selected], datasets, [b.model_dump() for b in value.guardrail_bindings or []], validate_connection=False)
         return environment
     from evaluation_backend.scorer_selection import resolve_scorers
     try:
@@ -94,6 +94,8 @@ def save_config(ident:str,value:TargetConfig,x_project_id:str=Header(min_length=
 
 
 class TriggerTarget(BaseModel):
+    provider: Literal['f5','nemo guardrail'] | None = None
+    guardrail_id: str | None = Field(default=None,min_length=1,max_length=128)
     model_config=ConfigDict(extra='forbid')
     name: str = Field(default='',max_length=200)
     config_revision: str = Field(min_length=1,max_length=128)
@@ -108,13 +110,17 @@ def trigger(ident:str,value:TriggerTarget,x_project_id:str=Header(min_length=1),
     if config['_revision']!=value.config_revision:raise Conflict('Target config changed; reload before triggering')
     selections = value.datasets or [DatasetSelection(**d, upload_id=value.upload_id) for d in configured_datasets(config)]
     allowed = {(d['dataset_id'], d['dataset_version']) for d in configured_datasets(config)}
+    if config.get('execution_mode')=='guardrail' and (len(selections)!=len(allowed) or {(d.dataset_id,d.dataset_version) for d in selections}!=allowed):
+        raise HTTPException(422, 'Every run of this Evaluation version must use all configured datasets')
     if any((d.dataset_id, d.dataset_version) not in allowed for d in selections):
         raise HTTPException(422, 'Dataset and version must be selected in Target configuration before triggering')
+    if config.get('execution_mode')=='guardrail':
+        selections=[DatasetSelection(**d) for d in configured_datasets(config)]
     if value.datasets is not None and value.upload_id:
         raise HTTPException(422, 'Specify uploads per dataset')
     if any((config['data_source']=='upload') != bool(s.upload_id) for s in selections):
         raise HTTPException(422,'Each dataset requires an upload only in upload mode')
-    request=StartRun(execution_mode=config.get("execution_mode","legacy"), config_revision=config["_revision"], guardrail_bindings=config.get("guardrail_bindings"), name=value.name,target_id=ident,dataset_id=selections[0].dataset_id,dataset_version=selections[0].dataset_version,
+    request=StartRun(guardrail_provider=value.provider,guardrail_instance_id=value.guardrail_id,execution_mode=config.get("execution_mode","legacy"), config_revision=config["_revision"], guardrail_bindings=config.get("guardrail_bindings"), name=value.name,target_id=ident,dataset_id=selections[0].dataset_id,dataset_version=selections[0].dataset_version,
         environment_id=config['environment_id'],environment_version=config['environment_version'],model_id=config['model_id'],
         scorer_selection=config.get('scorer_selection','shared'),scorer_ids=config['scorer_ids'],scoring_mode=config['scoring_mode'],snapshot={},upload_id=None if config.get('scorer_selection')=='dataset' else value.upload_id,datasets=selections if config.get("execution_mode")=="guardrail" or config.get("scorer_selection")=="dataset" or value.datasets is not None else None)
     return start(request,x_project_id,idempotency_key,cluster,service)
@@ -124,7 +130,7 @@ def load_config(service, project, ident):
     try: target = service.storage.get('targets', project, ident)
     except NotFound: target = {}
     if target.get('evaluation_config'):
-        return {**target['evaluation_config'], 'id':ident, '_revision':target['_revision']}
+        return {**target['evaluation_config'], 'id':ident, 'version':target['version'], '_revision':target['_revision']}
     return service.storage.get('target-configs', project, ident)
 
 

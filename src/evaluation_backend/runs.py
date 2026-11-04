@@ -48,6 +48,8 @@ class StartRun(BaseModel):
     execution_mode: Literal['legacy', 'guardrail'] = 'legacy'
     guardrail_bindings: list[dict] | None = None
     config_revision: str | None = None
+    guardrail_provider: Literal['f5','nemo guardrail'] | None = None
+    guardrail_instance_id: str | None = None
     name: str = Field(default="", max_length=200)
     target_id: str
     dataset_id: str
@@ -187,12 +189,18 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     environment = environment_version(service, x_project_id, request.environment_id, request.environment_version)
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
+    concurrency=environment.get('runner',{}).get('concurrency',1)
+    if type(concurrency) is not int or not 1<=concurrency<=32:raise HTTPException(422,'Environment case concurrency must be 1..32')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
     if request.resources is not None and request.resources != resources:
         raise HTTPException(422, 'Resources must match the stored environment version')
     target = get_target(service, x_project_id, request.target_id)
     if service.is_archived(x_project_id, 'targets', request.target_id): raise HTTPException(422, 'Evaluation is archived')
+    stored_target=service.storage.get('targets',x_project_id,request.target_id)
+    if stored_target.get('evaluation_config',{}).get('execution_mode')=='guardrail' and request.execution_mode!='guardrail':
+        raise HTTPException(422,'Trigger this Guardrail Evaluation using its saved configuration')
     if request.execution_mode == 'guardrail':
+        if request.scoring_mode!='installed':raise HTTPException(422,'Use the configured installed scoring mode')
         from evaluation_backend.target_configs import load_config, configured_datasets
         config = load_config(service, x_project_id, request.target_id)
         if request.config_revision != config['_revision']: raise Conflict('Evaluation configuration changed; reload before triggering')
@@ -201,6 +209,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         allowed = {(d['dataset_id'],d['dataset_version']) for d in configured_datasets(config)}
         requested = request.datasets or [DatasetSelection(dataset_id=request.dataset_id,dataset_version=request.dataset_version)]
         if any(s.upload_id or (s.dataset_id,s.dataset_version) not in allowed for s in requested): raise HTTPException(422, 'Select only configured dataset versions')
+        if len(requested)!=len(allowed) or {(s.dataset_id,s.dataset_version) for s in requested}!=allowed:raise HTTPException(422,'Use all datasets from the configured Evaluation version')
+        target={**target,'provider':request.guardrail_provider or target.get('provider'),'guardrail_id':request.guardrail_instance_id or target.get('guardrail_id')}
         request.guardrail_bindings = config.get('guardrail_bindings')
 
     selections = request.datasets or [DatasetSelection(dataset_id=request.dataset_id,
@@ -255,6 +265,8 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         if os.getenv('EVAL_GUARDRAIL_REGISTRY'):
             from evaluation_backend.guardrail_registry import credential
             credential(context['guardrail_connection'])
+    context['evaluation_config_id']=request.target_id
+    context['evaluation_config_version']=target['version']
     context['execution_mode'] = request.execution_mode
     context['guardrail_bindings'] = guardrail_bindings
     context['scoring_selections'] = dataset_records
@@ -266,6 +278,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         if context['request_hash'] != digest: raise HTTPException(409, 'Idempotency conflict')
     target = context.get('target', target)
     environment = context.get('environment', environment)
+    concurrency=environment.get('runner',{}).get('concurrency',1)
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
@@ -273,7 +286,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     snapshot = {'target': target, 'datasetId': request.dataset_id,
                 'dataset': {k: version[k] for k in ('name', 'version', 'publishedAt', 'fields')},
                 'environmentId': request.environment_id,
-                'environment': {**environment, 'modelId': request.model_id, 'runner': {'id': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'concurrency': 1}},
+                'environment': {**environment, 'modelId': request.model_id, 'runner': {'id': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'concurrency': concurrency}},
                 'scorers': []}
     snapshot['dataset'].update(rows=[], objective='', description='', tags=[], metadata={}, scorerIds=[])
     record = {k: v for k,v in request.model_dump().items() if k not in ('snapshot', 'upload_id')}
@@ -289,6 +302,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     job['metadata']['annotations'] = {PREFIX + 'project': x_project_id, PREFIX + 'record': json.dumps(record), PREFIX + 'request-hash': digest}
     job['spec']['template']['spec']['containers'][0]['env'].extend([
         {'name':'EVAL_JUDGE_MODEL_IDS','value':json.dumps(sorted({c['execution']['model_id'] for b in bindings for c in b['scorer_metadata'].get('evaluation',{}).get('scorers',{}).values() if c.get('execution',{}).get('engine')=='llm_judge'}))},
+        {'name':'EVAL_CONCURRENCY','value':str(concurrency)},
         {'name': 'EVAL_SCORING_ENABLED', 'value': str(context.get('feature_modes', feature_modes)['scoring_enabled']).lower()},
         {'name': 'EVAL_DATASET_VERSION', 'value': str(request.dataset_version)},
         {'name': 'EVAL_PLATFORM', 'value': 'storage'},

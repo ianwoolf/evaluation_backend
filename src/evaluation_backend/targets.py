@@ -15,7 +15,7 @@ class Target(BaseModel):
     id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
     name: str = Field(min_length=1, max_length=200)
     kind: Literal['GUARDRAIL'] = 'GUARDRAIL'
-    provider: Literal['f5', 'nemo guardrail']
+    provider: Literal['f5', 'nemo guardrail'] | None = None
     version: int = Field(ge=1, strict=True)
     definition: str = Field(default='', max_length=4000)
     guardrail_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')

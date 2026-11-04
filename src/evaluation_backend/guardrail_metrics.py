@@ -52,3 +52,29 @@ def summarize_requests(requests, bindings):
                         'p50_ms': percentile(times, .5), 'p95_ms': percentile(times, .95)},
             'cost': {'amount': amount, 'currency': 'USD', 'source': 'mock'}})
     return result
+
+
+def aggregate_results(requests, bindings):
+    """Micro-average classification counts; latency counts actual sent requests once."""
+    ids={b['binding_id'] for b in bindings}
+    selected=[];seen=set()
+    for r in requests:
+        if r['request_id'] in seen or not ids.intersection(r['binding_ids']):continue
+        seen.add(r['request_id']);selected.append(r)
+    counts={k:0 for k in ('TP','FP','TN','FN')}
+    times=[];errors=0
+    for r in selected:
+        values=[c for c in r.get('classifications',[]) if c['binding_id'] in ids]
+        if r['status']=='ERROR' or not values:errors+=1
+        else:
+            for c in values:counts[c['outcome']]+=1
+        if r.get('http_status') is not None or r.get('sent',False):times.append(r['guardrail_latency_ms'])
+    tp,fp,tn,fn=[counts[k] for k in ('TP','FP','TN','FN')]
+    def ratio(a,b):return a/b if b else None
+    times.sort()
+    def pct(p):return times[max(0,math.ceil(p*len(times))-1)] if times else None
+    valid=tp+fp+tn+fn
+    return {**counts,'precision':ratio(tp,tp+fp),'recall':ratio(tp,tp+fn),'accuracy':ratio(tp+tn,valid),'f1':ratio(2*tp,2*tp+fp+fn),
+            'processed':len(selected),'errors':errors,'valid_count':valid,'sample_count':sum(b.get('sample_count',0) for b in bindings),
+            'pending':max(0,sum(b.get('sample_count',0) for b in bindings)-len(selected)),
+            'latency':{'average_ms':ratio(sum(times),len(times)),'p50_ms':pct(.5),'p95_ms':pct(.95),'count':len(times)}}

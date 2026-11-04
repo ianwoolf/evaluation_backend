@@ -83,17 +83,28 @@ def create_collector():
         resources = value.get('resourceSpans')
         if not isinstance(resources, list):
             raise HTTPException(422, 'OTLP JSON resourceSpans is required')
-        for resource in resources:
-            for scope in resource.get('scopeSpans', []):
-                for span in scope.get('spans', []):
-                    trace_id, span_id = span.get('traceId'), span.get('spanId')
-                    if not trace_id or not span_id:
-                        raise HTTPException(422, 'traceId and spanId are required')
-                    ident = f'{evaluation}:{trace_id}:{span_id}'
-                    service.storage.put('traces', project, ident, {'id': ident,
-                        'evaluation_id': evaluation, **trace_target(service, project, evaluation), 'created_at': now(), 'name': 'Execution trace' if policy.restricted else span.get('name', 'span'),
-                        'sample_id': next((a.get('value',{}).get('stringValue') for a in span.get('attributes',[]) if a.get('key')=='evaluation.sample_id'),None),
-                        'data': policy.trace_data({'span': span, 'resource': resource.get('resource', {}), 'scope': scope.get('scope', {})})})
+        def persist():
+            # ES is synchronous: keep it off the ASGI event loop so typed feedback
+            # and health checks can progress while a trace export is in flight.
+            target=trace_target(service, project, evaluation)
+            records=[]
+            for resource in resources:
+                for scope in resource.get('scopeSpans', []):
+                    for span in scope.get('spans', []):
+                        trace_id, span_id = span.get('traceId'), span.get('spanId')
+                        if not trace_id or not span_id:
+                            raise HTTPException(422, 'traceId and spanId are required')
+                        ident = f'{evaluation}:{trace_id}:{span_id}'
+                        records.append({'id': ident,
+                            'evaluation_id': evaluation, **target, 'created_at': now(), 'name': 'Execution trace' if policy.restricted else span.get('name', 'span'),
+                            'sample_id': next((a.get('value',{}).get('stringValue') for a in span.get('attributes',[]) if a.get('key')=='evaluation.sample_id'),None),
+                            'data': policy.trace_data({'span': span, 'resource': resource.get('resource', {}), 'scope': scope.get('scope', {})})})
+            if hasattr(service.storage,'put_traces'):
+                service.storage.put_traces(project,records)
+            else:
+                for record in records:service.storage.put('traces',project,record['id'],record)
+        from starlette.concurrency import run_in_threadpool
+        await run_in_threadpool(persist)
         return Response(content=b'',media_type='application/x-protobuf') if protobuf else {}
 
     instrument_app(app)

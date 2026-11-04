@@ -159,6 +159,22 @@ class ElasticsearchStorage:
         hit = self.call('PUT', f'/{self.index(collection)}/_doc/{self.key(project, ident)}', json=doc, params=params)
         return {**payload, '_revision': f"{hit['_seq_no']}:{hit['_primary_term']}"}
 
+    @observed('storage.traces.batch', project_id='project')
+    def put_traces(self, project, records):
+        if not records:return
+        lines=[]
+        for value in records:
+            ident=value['id']
+            payload={k:v for k,v in value.items() if k!='_revision'}
+            doc={'project_id':project,'id':ident,'payload':payload}
+            for name in ('evaluation_id','sample_id','dataset_id','scorer_id','status','created_at'):
+                if name in payload:doc[name]=payload[name]
+            lines.extend([json.dumps({'index':{'_id':self.key(project,ident)}}),json.dumps(doc)])
+        result=self.call('POST',f'/{self.index("traces")}/_bulk',
+            content='\n'.join(lines)+'\n',headers={'Content-Type':'application/x-ndjson'},params={'refresh':'wait_for'})
+        if result.get('errors') or any(item.get('index',{}).get('status',500)>=300 for item in result.get('items',[])):
+            raise StorageError('Elasticsearch trace batch contains failed writes')
+
     @observed('storage.search', collection='collection', project_id='project')
     def search(self, collection, project, *, filters=None, offset=0, limit=100):
         if collection != 'traces':

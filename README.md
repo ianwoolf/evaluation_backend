@@ -379,3 +379,11 @@ Trigger via `POST /api/v1/evaluations/targets/{id}/runs` with `config_revision` 
 ### Guardrail instance registry
 
 Set `EVAL_GUARDRAIL_REGISTRY` to the JSON registry file. Each provider owns an instance list with `id` and full endpoint `address`; optional `name`, `enabled`, `token_env` are supported. API `/api/v1/evaluations/guardrail-instances` exposes only non-secret metadata. The runner detail endpoint uses a run-scoped address snapshot and resolves credentials from the referenced environment variable or `<NAME>_FILE` Secret. K8s uses ConfigMap `evaluation-guardrails`; Compose mounts `config/guardrails.json`. Re-run Compose `init_secrets.py` for the new `guardrail_token` file and populate it with the actual endpoint token. Restart API to reload configuration.
+
+### Case concurrency
+
+Environment `runner.concurrency` (1–32, default 1) becomes Runner `EVAL_CONCURRENCY`. Every evaluation uses one execution Pod (`parallelism=1`, `completions=1`, no retry). Guardrail cases from all selected datasets share a bounded thread pool; a case includes the target request and Git scorer. Pinned Git artifacts are prepared once and cached safely. The main thread persists results and updates counters. The report snapshot records the configured concurrency. Publish a new environment version and select it in Evaluation configuration to change subsequent runs.
+
+### Collector throughput and feedback timeout
+
+Runner HTTP requests to the API and local Collector use a 300-second timeout. This is a per-request feedback timeout, separate from Guardrail HTTP timeouts and the Kubernetes Job deadline. OTLP batches are validated and persisted outside the Collector ASGI event loop; Elasticsearch receives one `_bulk` request per trace batch and one refresh wait. Failed bulk items fail the export rather than silently dropping spans. Typed samples remain individually persisted; progress updates are coalesced at the configured case concurrency and flushed on completion.

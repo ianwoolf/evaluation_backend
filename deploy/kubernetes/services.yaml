@@ -61,7 +61,7 @@ data:
   EVAL_GIT_SSH_SECRET_NAME: evaluation-git-ssh
   EVAL_GIT_SSH_SECRET_KEY: ssh-privatekey
   EVAL_GIT_SSH_KNOWN_HOSTS_CONFIGMAP: evaluation-git-known-hosts
-  EVAL_WORKER_IMAGE: evaluation-worker:guardrail-registry-20261104
+  EVAL_WORKER_IMAGE: evaluation-worker:collector-batch-r2-20261104
   EVAL_UPLOAD_DIR: /uploads
   EVAL_CONTENT_POLICY: '{"input":"retain","response":"retain","reference":"retain"}'
 ---
@@ -105,7 +105,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: api
-        image: evaluation-worker:guardrail-registry-20261104
+        image: evaluation-worker:collector-batch-r2-20261104
         imagePullPolicy: IfNotPresent
         command:
         - python

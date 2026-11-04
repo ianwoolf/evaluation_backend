@@ -31,10 +31,10 @@ def test_dataset_first_atomic_configuration_and_subset(setup,monkeypatch):
  assert saved.status_code==200,saved.text
  config=c.get(ROOT+'/targets/g/config',headers=h).json()
  assert len(config['guardrail_bindings'])==2
- r=c.post(ROOT+'/targets/g/runs',json={'config_revision':config['revision'],'datasets':[{'dataset_id':'second','dataset_version':1}]},headers=h)
+ r=c.post(ROOT+'/targets/g/runs',json={'config_revision':config['revision'],'datasets':config['datasets'],'provider':'f5','guardrail_id':'g'},headers=h)
  assert r.status_code==200,r.text
  assert r.json()['execution_mode']=='guardrail'
- assert [d['dataset_id'] for d in r.json()['datasets']]==['second']
+ assert [d['dataset_id'] for d in r.json()['datasets']]==['first','second']
  context=service.storage.get('run-contexts','p',r.json()['experiment_id'])
  assert context['guardrail_bindings'][0]['scorer_commit']=='a'*40
  assert context['guardrail_bindings'][0]['aspect_name']=='Safety'
@@ -77,3 +77,22 @@ def test_direct_guardrail_endpoint_requires_saved_configuration(setup,monkeypatc
  value['config_revision']=saved['revision']
  assert c.post(ROOT+'/guardrail-runs',json=value,headers=h).status_code==422
  assert k.created==0
+
+
+def test_run_target_varies_without_changing_evaluation_version(setup,monkeypatch):
+ c,k,h,service,body=prepare(setup,monkeypatch)
+ body['target']['provider']=None;body['target']['guardrail_id']=None
+ saved=c.post(ROOT+'/targets/g/configuration',json=body,headers=h)
+ assert saved.status_code==200,saved.text
+ config=c.get(ROOT+'/targets/g/config',headers=h).json()
+ contexts=[]
+ for provider in ('f5','nemo guardrail'):
+  r=c.post(ROOT+'/targets/g/runs',json={'config_revision':config['revision'],'provider':provider,'guardrail_id':'g'},headers={**h,'Idempotency-Key':'run-provider-'+provider+'-1234567890'})
+  assert r.status_code==200,r.text
+  contexts.append(service.storage.get('run-contexts','p',r.json()['experiment_id']))
+ assert contexts[0]['evaluation_config_version']==contexts[1]['evaluation_config_version']==saved.json()['version']
+ assert contexts[0]['datasets']==contexts[1]['datasets']
+ assert contexts[0]['guardrail_connection']['provider']=='f5'
+ assert contexts[1]['guardrail_connection']['provider']=='nemo guardrail'
+ assert c.post(ROOT+'/targets/g/runs',json={'config_revision':config['revision'],'provider':'f5','guardrail_id':'missing'},headers={**h,'Idempotency-Key':'missing-instance-123456789'}).status_code==422
+ assert k.created==2

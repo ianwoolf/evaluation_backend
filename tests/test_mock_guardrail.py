@@ -6,6 +6,7 @@ from evaluation_backend.mock_guardrail import app
 
 
 def test_scan_and_scorer(monkeypatch):
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0')
     monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN', 'local-test-token')
     c=TestClient(app); path='/runtime/v1/endpoints/mock-guardrail/backend/v1/scans'
     assert c.post(path,json={'input':'hi'}).status_code==401
@@ -22,6 +23,7 @@ def test_scan_and_scorer(monkeypatch):
 
 def test_structured_request_logs_and_health_filter(monkeypatch,capsys):
     import json
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0')
     monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN','DO_NOT_LOG_TOKEN')
     client=TestClient(app)
     for path in ('/health','/ready','/health?probe=1'):
@@ -42,3 +44,26 @@ def test_structured_request_logs_and_health_filter(monkeypatch,capsys):
         rows=[json.loads(line) for line in capsys.readouterr().out.splitlines()]
         assert rows[-1]['event']=='guardrail.request.failed' and rows[-1]['status_code']==status
         assert rows[0]['request_id']==rows[-1]['request_id']==r.headers['X-Request-ID']
+
+
+@pytest.mark.parametrize('draw,flipped,expected',[(.05,True,'blocked'),(.5,False,'cleared')])
+def test_random_flip_probability(monkeypatch,capsys,draw,flipped,expected):
+    import json
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN','test-token')
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0.1')
+    monkeypatch.setattr('evaluation_backend.mock_guardrail.random.random',lambda:draw)
+    c=TestClient(app);path='/runtime/v1/endpoints/mock-guardrail/backend/v1/scans';h={'Authorization':'Bearer test-token'}
+    r=c.post(path,headers=h,json={'input':'benign','flagOnly':False})
+    assert r.json()['result']['outcome']==expected
+    assert r.headers['X-Evaluation-Mock-Flipped']==str(flipped).lower()
+    logs=[json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert logs[-1]['flipped']==flipped and logs[-1]['baseline_outcome']=='cleared'
+    r=c.post(path,headers=h,json={'input':'[mock:unsafe]','flagOnly':False})
+    assert r.json()['result']['outcome']==('cleared' if flipped else 'blocked')
+
+@pytest.mark.parametrize('value',['nan','-1','1.1','invalid'])
+def test_invalid_flip_rate(monkeypatch,value):
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN','test-token')
+    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE',value)
+    r=TestClient(app).post('/runtime/v1/endpoints/mock-guardrail/backend/v1/scans',headers={'Authorization':'Bearer test-token'},json={'input':'hello'})
+    assert r.status_code==503

@@ -18,7 +18,7 @@ class StorageClient:
             raise ValueError('EVAL_STORAGE_TOKEN and EVAL_PROJECT_ID are required')
         self.base = base + '/api/v1/evaluations/'
         self.write_base = env.get('EVAL_COLLECTOR_URL', base).rstrip('/') + '/api/v1/evaluations/'
-        self.client = client or httpx.Client(timeout=30, trust_env=False,
+        self.client = client or httpx.Client(timeout=300, trust_env=False,
             headers={'Authorization': 'Bearer ' + token, 'X-Project-ID': project})
 
     @observed('feedback.request', method='method')

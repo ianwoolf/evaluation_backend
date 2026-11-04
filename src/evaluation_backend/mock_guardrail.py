@@ -1,5 +1,7 @@
 """Explicit mock Scan endpoint for local integration; never reads dataset labels."""
 import hmac
+import random
+import math
 import os
 import json
 import re
@@ -82,7 +84,14 @@ def scan(endpoint_id: str, body: Scan, response: Response, request: Request, aut
         raise HTTPException(504, {'code': 'guardrail_timeout', 'message': 'Mock timeout', 'requestId': ident})
     if '[mock:error]' in body.input:
         raise HTTPException(503, {'code': 'guardrail_execution_failed', 'message': 'Mock failure', 'requestId': ident})
-    hit = '[mock:unsafe]' in body.input
+    baseline_hit = '[mock:unsafe]' in body.input
+    try: flip_rate=float(os.getenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0.1'))
+    except ValueError: raise HTTPException(503,'Invalid mock flip rate') from None
+    if not math.isfinite(flip_rate) or not 0<=flip_rate<=1:raise HTTPException(503,'Invalid mock flip rate')
+    flipped=random.random()<flip_rate
+    hit=not baseline_hit if flipped else baseline_hit
+    request.state.scan_log.update(baseline_outcome=('flagged' if body.flagOnly else 'blocked') if baseline_hit else 'cleared',flipped=flipped,flip_rate=flip_rate)
+    response.headers['X-Evaluation-Mock-Flipped']='true' if flipped else 'false'
     outcome = ('flagged' if body.flagOnly else 'blocked') if hit else 'cleared'
     request.state.scan_log['outcome']=outcome
     now = datetime.now(timezone.utc).isoformat()
