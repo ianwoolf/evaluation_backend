@@ -36,8 +36,8 @@ API 和新 runner 使用统一 Secret，模型 JSON、绑定 JSON 和 UI JSON/Ng
 
 ## 部署顺序
 
-当前清单使用本地镜像 `evaluation-worker:configured-datasets-20261030`，需先执行
-`docker build -f Dockerfile.worker -t evaluation-worker:configured-datasets-20261030 .` 并导入 K8s 节点。
+当前清单使用本地镜像 `evaluation-worker:guardrail-tls-20261109`，需先执行
+`docker build -f Dockerfile.worker -t evaluation-worker:guardrail-tls-20261109 .` 并导入 K8s 节点。
 此标签尚未发布到 Docker Hub。已有数据升级前，按照
 [storage-service.md](../../docs/storage-service.md) 停止写入、迁移，再启动新版本。
 修改 `evaluation-storage` 后需要重启 API；新建 runner Job 自动加载新配置。
@@ -49,14 +49,15 @@ API 和新 runner 使用统一 Secret，模型 JSON、绑定 JSON 和 UI JSON/Ng
 5. 通过 API 导入 Dataset、创建 Environment、保存每个 target Config，再运行评测。
 
 ```bash
-docker build -f Dockerfile.worker -t evaluation-worker:configured-datasets-20261030 .
+docker build -f Dockerfile.worker -t evaluation-worker:guardrail-tls-20261109 .
 # ES 使用与现有磁盘一致的版本；本地无镜像时才从官方仓库拉取。
 docker pull docker.io/library/elasticsearch:8.19.23
-bash deploy/kubernetes/import-local-image.sh evaluation-worker:configured-datasets-20261030 docker.io/library/elasticsearch:8.19.23
+bash deploy/kubernetes/import-local-image.sh evaluation-worker:guardrail-tls-20261109 docker.io/library/elasticsearch:8.19.23
 kubectl --context docker-desktop create namespace evaluation --dry-run=client -o yaml | kubectl --context docker-desktop apply -f -
 PYTHONPATH=src python3 deploy/kubernetes/render_secrets.py --config .env | kubectl --context docker-desktop apply -f -
 kubectl --context docker-desktop apply -f deploy/kubernetes/elasticsearch.yaml
 kubectl --context docker-desktop apply -f deploy/kubernetes/uploads.yaml
+kubectl --context docker-desktop apply -f deploy/kubernetes/guardrails.yaml
 kubectl --context docker-desktop apply -f deploy/kubernetes/services.yaml
 kubectl --context docker-desktop -n evaluation rollout status statefulset/evaluation-es --timeout=180s
 kubectl --context docker-desktop -n evaluation rollout status deployment/evaluation-api --timeout=120s
@@ -76,7 +77,9 @@ target 目录保存在 ES 的 evaluation-records-v2（record_type=target），�
 `kindest/node:v1.36.1` 临时 privileged helper 导入隐藏节点 containerd，不推送仓库。
 其他节点版本通过 `KIND_NODE_IMAGE` 指定已有镜像；标准 kind 集群可设置
 `KIND_CLUSTER_NAME` 使用 `kind load docker-image`。生产环境改用可访问仓库及不可变 tag/digest。
-API image 与 `EVAL_WORKER_IMAGE` 必须一致。当前应用镜像为本地 configured-datasets-20261030 标签，需自行构建/导入或推送到自己的仓库。
+API image 与 `EVAL_WORKER_IMAGE` 必须一致。其他集群应使用其节点可访问的镜像仓库。
+
+在 `evaluation-guardrails` 的 `guardrails.json` 中，给需要跳过证书校验的 HTTPS 实例设置 `"verify_ssl": false`。默认是 `true`。升级已有集群时，保留 ConfigMap 中已登记的实例，再应用配置并重启 `evaluation-api`。设置对新触发的测评生效。
 
 ## 初始化业务数据与配置
 

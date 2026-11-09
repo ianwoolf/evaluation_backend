@@ -4,6 +4,7 @@ metadata:
   name: evaluation-guardrails
   namespace: evaluation
 data:
+  # For a specific HTTPS instance, set verify_ssl to false to skip certificate verification.
   guardrails.json: |
     {
       "version": 1,
@@ -17,6 +18,7 @@ data:
               "name": "Mock Guardrail",
               "address": "http://evaluation-mock-guardrail:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans",
               "enabled": true,
+              "verify_ssl": true,
               "token_env": "EVAL_MOCK_GUARDRAIL_TOKEN"
             }
           ]
@@ -30,6 +32,7 @@ data:
               "name": "Mock Guardrail",
               "address": "http://evaluation-mock-guardrail:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans",
               "enabled": true,
+              "verify_ssl": true,
               "token_env": "EVAL_MOCK_GUARDRAIL_TOKEN"
             }
           ]

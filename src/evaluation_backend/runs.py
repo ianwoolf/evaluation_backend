@@ -156,6 +156,55 @@ def summary(job, cluster, service=None, project=None):
             'error': error, 'phase': status if status != 'RUNNING' else 'RUNNING' if job.get('status', {}).get('active') else 'QUEUED'}
 
 
+TERMINAL_STATUSES = {'COMPLETED', 'FAILED', 'CANCELLED'}
+
+
+def persisted_run(context, service, project):
+    """Render a stored report after its execution Job has been collected."""
+    status = context.get('status')
+    if not context.get('job_name'):
+        return None
+    if status not in TERMINAL_STATUSES:
+        try:
+            experiment = service.storage.get('experiments', project, context['id'])
+        except NotFound:
+            return None
+        status = experiment.get('status')
+        if status not in TERMINAL_STATUSES:
+            return None
+        context = {**context, 'items': experiment.get('items', 0)}
+    dataset_id = context['dataset_id']
+    selections = context.get('datasets') or context.get('scoring_selections') or []
+    datasets = [{key: selection[key] for key in ('dataset_id', 'dataset_version', 'name', 'sample_count', 'objective', 'scorer_ids')
+                 if key in selection} for selection in selections]
+    primary = next((selection for selection in datasets if selection['dataset_id'] == dataset_id), {})
+    environment = context['environment']
+    record = {key: context[key] for key in ('execution_mode', 'feature_modes', 'target_id', 'environment_id',
+                                            'environment_version', 'dataset_version', 'scoring_mode', 'scorer_selection') if key in context}
+    return {**record, 'id': context['job_name'], 'experiment_id': context['id'],
+            'name': context['name'], 'created_at': context['created_at'], 'status': status, 'phase': status,
+            'runtime': 'kubernetes', 'model_id': environment['modelId'],
+            'scorer_ids': list(dict.fromkeys(scorer for dataset in datasets for scorer in dataset.get('scorer_ids', [])))
+                          or context.get('scorer_ids', []),
+            'completed': context.get('items', 0), 'sample_count': context.get('total_samples', 0),
+            'datasets': datasets, 'dataset_id': dataset_id,
+            'snapshot': context.get('report_snapshot') or {'target': context['target'], 'environmentId': context['environment_id'],
+                         'environment': environment, 'datasetId': dataset_id, 'scorers': [],
+                         'dataset': {'name': primary.get('name', dataset_id), 'version': context['dataset_version'],
+                                     'rows': [], 'fields': [], 'scorerIds': [], 'tags': [], 'metadata': {},
+                                     'objective': primary.get('objective', ''), 'description': ''}}}
+
+
+def stored_run_contexts(service, project):
+    offset = 0
+    while offset < 10000:
+        page = service.storage.search('run-contexts', project, offset=offset, limit=100)
+        yield from page['items']
+        offset += len(page['items'])
+        if not page['items'] or offset >= page['total']:
+            break
+
+
 @router.get('/config', dependencies=[Depends(authorize)])
 def configuration():
     return {'runtime': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'scoring_modes': ['mock', 'installed'],
@@ -183,6 +232,17 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
             raise HTTPException(409, 'Idempotency key was used for different configuration')
         event('evaluation.trigger.reused', run_id=experiment, job_name=name)
         return summary(previous, cluster, service, x_project_id)
+    # The storage adapter retains the run context after Kubernetes collects the Job.
+    try:
+        stored = service.storage.get('run-contexts', x_project_id, experiment)
+    except NotFound:
+        stored = None
+    if stored and os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes') != 'docker':
+        if stored['request_hash'] != digest:
+            raise HTTPException(409, 'Idempotency key was used for different configuration')
+        historical = persisted_run(stored, service, x_project_id)
+        if historical:
+            return historical
     from evaluation_backend.environments import environment_version
     from evaluation_backend.targets import get_target
     if service.is_archived(x_project_id,'environments',request.environment_id):raise HTTPException(422,'Environment is archived; select an active environment')
@@ -272,6 +332,15 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     context['scoring_selections'] = dataset_records
     if request.datasets is not None or request.scorer_selection == 'dataset':
         context['datasets'] = dataset_records
+    # Do not put caller-supplied rows or arbitrary snapshot data in Kubernetes annotations.
+    snapshot = {'target': target, 'datasetId': request.dataset_id,
+                'dataset': {k: version[k] for k in ('name', 'version', 'publishedAt', 'fields')},
+                'environmentId': request.environment_id,
+                'environment': {**environment, 'modelId': request.model_id, 'runner': {'id': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'concurrency': concurrency}},
+                'scorers': []}
+    snapshot['dataset'].update(rows=[], objective='', description='', tags=[], metadata={}, scorerIds=[])
+    context['report_snapshot'] = snapshot
+    context['scorer_selection'] = request.scorer_selection
     try: service.storage.put('run-contexts', x_project_id, experiment, context, create=True)
     except Conflict:
         context = service.storage.get('run-contexts', x_project_id, experiment)
@@ -282,13 +351,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
-    # Do not put caller-supplied rows or arbitrary snapshot data in Kubernetes annotations.
-    snapshot = {'target': target, 'datasetId': request.dataset_id,
-                'dataset': {k: version[k] for k in ('name', 'version', 'publishedAt', 'fields')},
-                'environmentId': request.environment_id,
-                'environment': {**environment, 'modelId': request.model_id, 'runner': {'id': os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes'), 'concurrency': concurrency}},
-                'scorers': []}
-    snapshot['dataset'].update(rows=[], objective='', description='', tags=[], metadata={}, scorerIds=[])
+    snapshot = context.get('report_snapshot', snapshot)
     record = {k: v for k,v in request.model_dump().items() if k not in ('snapshot', 'upload_id')}
     record['feature_modes'] = context.get('feature_modes', feature_modes)
     record.update(name=context.get('name', request.name.strip() or generated_name), snapshot=snapshot, sample_count=count, resources=resources.model_dump())
@@ -317,8 +380,6 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         container = job['spec']['template']['spec']['containers'][0]
         container['command'] = ['python', '-m', 'evaluation_backend.proxy_entrypoint', '--', 'python', '-m', 'evaluation_backend.guardrail_worker']
         container['env'].append({'name': 'EVAL_LLM_PROXY_ENABLED', 'value': 'false'})
-    # Retain runs for history; explicit cleanup can be configured by operators.
-    job['spec'].pop('ttlSecondsAfterFinished', None)
     try:
         created = cluster.call('POST', cluster.jobs, json=job)
     except HTTPException as error:
@@ -334,11 +395,29 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
 @router.get('/runs', dependencies=[Depends(authorize)])
 def list_runs(x_project_id: str = Header(min_length=1), cluster=Depends(kube), service=Depends(get_service)):
     jobs = cluster.call('GET', cluster.jobs, params={'labelSelector': 'app=evaluation-worker,project=' + project_label(x_project_id)})
-    return {'items': [summary(owned(j, x_project_id), cluster, service, x_project_id) for j in jobs.get('items', [])]}
+    items = [summary(owned(j, x_project_id), cluster, service, x_project_id) for j in jobs.get('items', [])]
+    if os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes') != 'docker':
+        live_ids = {item['id'] for item in items}
+        for context in stored_run_contexts(service, x_project_id):
+            if context.get('job_name') not in live_ids:
+                historical = persisted_run(context, service, x_project_id)
+                if historical:
+                    items.append(historical)
+    return {'items': items}
 
 
 @router.get('/runs/{name}', dependencies=[Depends(authorize)])
 def get_run(name: str, x_project_id: str = Header(min_length=1), cluster=Depends(kube), service=Depends(get_service)):
     if not name.startswith('eval-') or not all(c.isalnum() or c == '-' for c in name):
         raise HTTPException(404, 'Evaluation not found')
-    return summary(owned(cluster.call('GET', cluster.jobs + '/' + name), x_project_id), cluster, service, x_project_id)
+    try:
+        job = owned(cluster.call('GET', cluster.jobs + '/' + name), x_project_id)
+    except HTTPException as error:
+        if error.status_code == 404 and os.getenv('EVAL_EXECUTION_BACKEND', 'kubernetes') != 'docker':
+            for context in stored_run_contexts(service, x_project_id):
+                if context.get('job_name') == name:
+                    historical = persisted_run(context, service, x_project_id)
+                    if historical:
+                        return historical
+        raise
+    return summary(job, cluster, service, x_project_id)

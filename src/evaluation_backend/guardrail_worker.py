@@ -1,12 +1,36 @@
 """Direct Scan execution with runner-local pinned Git scoring."""
+import json
 import os
 import time
+from urllib.parse import urlsplit
 import httpx
 from evaluation_backend import tracing
 from evaluation_backend.observability import correlation_headers
 from evaluation_backend.storage.client import StorageClient
 from evaluation_backend.guardrail_contracts import ClassificationResult, GuardrailRequestResult
 from evaluation_backend.observability import configure_logging, event, shutdown_logging
+
+
+def request_error_reason(error, *, has_token):
+    # HTTP exception text can contain credentials, response headers or payloads.
+    if isinstance(error, httpx.HTTPStatusError):
+        return f'Guardrail returned HTTP {error.response.status_code}'
+    if isinstance(error, json.JSONDecodeError):
+        return f'Invalid JSON response at line {error.lineno}, column {error.colno}'
+    if isinstance(error, httpx.LocalProtocolError) and str(error).startswith('Illegal header value'):
+        return 'Invalid Authorization header: empty Bearer token' if not has_token else 'Invalid HTTP header value'
+    if isinstance(error, httpx.ConnectError):
+        message = str(error).lower()
+        for marker, reason in (
+            ('certificate_verify_failed', 'TLS certificate verification failed'),
+            ('name or service not known', 'DNS resolution failed'),
+            ('temporary failure in name resolution', 'Temporary DNS resolution failure'),
+            ('connection refused', 'Guardrail connection refused'),
+            ('network is unreachable', 'Guardrail network unreachable'),
+        ):
+            if marker in message:
+                return reason
+    return f'Guardrail request failed: {type(error).__name__}'
 
 
 def execute_case(ident, di, ri, content, binding, row, http, detail):
@@ -22,12 +46,13 @@ def execute_case(ident, di, ri, content, binding, row, http, detail):
             'input':{'input':row['input']},'reference':{'label':row['label'],'strategy':row['strategy']},
             'output':{},'status':'ERROR','scores':[],'trace':[],'costUsd':0,'latencyMs':0,'error':None}
         event('guardrail.sample.started',run_id=ident,sample_id=sample_id)
+        server_host = None
         try:
             before=time.perf_counter();g['sent']=True;g['cost']['amount']=.001
             try:
                 with tracing.span('guardrail.scan',{'http.request.method':'POST','evaluation.sample_id':sample_id,'evaluation.cost.amount':.001,'evaluation.cost.currency':'USD','evaluation.cost.source':'mock'},client=True) as http_span:
-                    from urllib.parse import urlsplit
                     endpoint=urlsplit(detail['endpoint'])
+                    server_host = endpoint.hostname
                     http_span.set_attribute('server.address',endpoint.hostname or '')
                     http_span.set_attribute('url.path',endpoint.path)
                     body={'input':row['input'],'verbose':True,'flagOnly':False}
@@ -56,7 +81,15 @@ def execute_case(ident, di, ri, content, binding, row, http, detail):
             sample['error']=f'{stage} execution failed'
             from opentelemetry.trace import Status,StatusCode
             request_span.set_status(Status(StatusCode.ERROR,type(error).__name__))
-            event('guardrail.sample.failed',level='ERROR',run_id=ident,sample_id=sample_id,error=error)
+            request_fields = {}
+            if stage in ('target', 'response'):
+                request_fields = {
+                    'method': 'POST', 'server_host': server_host,
+                    'verify_ssl': detail.get('verify_ssl', True),
+                    'status_code': g.get('http_status'), 'duration_ms': round(g['guardrail_latency_ms'], 2),
+                    'error_reason': request_error_reason(error, has_token=bool(detail.get('token'))),
+                }
+            event('guardrail.sample.failed',level='ERROR',run_id=ident,sample_id=sample_id,error=error,phase=stage,**request_fields)
         g['total_latency_ms']=(time.perf_counter()-started)*1000
         sample.update(guardrail_result=GuardrailRequestResult.model_validate(g).model_dump(),
             latencyMs=g['total_latency_ms'],costUsd=g['cost']['amount'])
@@ -86,7 +119,7 @@ def run(client=None):
     local=threading.local();clients=[];lock=threading.Lock()
     def task(di,ri,content,binding,row):
         if not hasattr(local,'http'):
-            local.http=httpx.Client(timeout=30,trust_env=False)
+            local.http=httpx.Client(timeout=30,trust_env=False,verify=detail.get('verify_ssl', True))
             with lock:clients.append(local.http)
         return execute_case(ident,di,ri,content,binding,row,local.http,detail)
     tasks=iter((di,ri,c,by_dataset[c['dataset_id']],row) for di,c in enumerate(contents) for ri,row in enumerate(c['rows']))
@@ -129,7 +162,6 @@ def run(client=None):
 
 
 if __name__=='__main__':
-    import json
     configure_logging('guardrail-worker')
     try:
         result=run();print(json.dumps({**result,'evaluation_id':os.environ['EXPERIMENT_ID']}))

@@ -25,7 +25,8 @@ _service = None
 _FIELDS = {'request_id', 'project_id', 'run_id', 'sample_id', 'dataset_id', 'environment_id',
            'target_id', 'model_id', 'scorer_id', 'job_name', 'upload_id', 'collection', 'operation',
            'method', 'route', 'status_code', 'status', 'count', 'duration_ms', 'exit_code',
-           'component', 'version', 'scoring_mode', 'cpu_millicores', 'memory_mib', 'phase'}
+           'component', 'version', 'scoring_mode', 'cpu_millicores', 'memory_mib', 'phase',
+           'error_reason', 'server_host', 'verify_ssl'}
 
 
 class JsonHandler(logging.Handler):

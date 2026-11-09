@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 from fastapi import APIRouter,Depends,HTTPException
-from pydantic import BaseModel,ConfigDict,Field,model_validator
+from pydantic import BaseModel,ConfigDict,Field,StrictBool,model_validator
 from evaluation_backend.runs import authorize
 
 class Instance(BaseModel):
@@ -13,6 +13,7 @@ class Instance(BaseModel):
     address:str
     name:str=''
     enabled:bool=True
+    verify_ssl:StrictBool=True
     token_env:str|None=Field(default=None,pattern=r'^[A-Za-z_][A-Za-z0-9_]*$')
     @model_validator(mode='after')
     def endpoint(self):
@@ -57,7 +58,7 @@ def resolve(target):
         if provider.id!=target.get('provider'):continue
         for instance in provider.instances:
             if instance.id==(target.get('guardrail_id') or target['id']) and instance.enabled:
-                return dict(provider=provider.id,id=instance.id,name=instance.name,address=instance.address,token_env=instance.token_env,registry_revision=revision(value))
+                return dict(provider=provider.id,id=instance.id,name=instance.name,address=instance.address,token_env=instance.token_env,verify_ssl=instance.verify_ssl,registry_revision=revision(value))
     raise HTTPException(422,'Selected Guardrail instance is unavailable for this provider; choose an enabled configured instance')
 
 router=APIRouter(prefix='/api/v1/evaluations',dependencies=[Depends(authorize)])

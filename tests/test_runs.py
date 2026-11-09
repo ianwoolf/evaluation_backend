@@ -73,6 +73,7 @@ def test_launch_idempotency_pinning_and_project_isolation(setup):
     assert cluster.created == 1
     job = cluster.saved[run['id']]
     env = {e['name']: e['value'] for e in job['spec']['template']['spec']['containers'][0]['env'] if 'value' in e}
+    assert job['spec']['ttlSecondsAfterFinished'] == 7200
     assert job['spec']['parallelism'] == job['spec']['completions'] == 1
     assert env['EVAL_CONCURRENCY'] == '3'
     assert env['DATASET_ID'] == 'd'
@@ -83,6 +84,23 @@ def test_launch_idempotency_pinning_and_project_isolation(setup):
     assert client.get('/api/v1/evaluations/runs/' + run['id'], headers={**headers, 'X-Project-ID': 'other'}).status_code == 404
     body['name'] = 'Changed'
     assert client.post('/api/v1/evaluations/runs', json=body, headers=headers).status_code == 409
+
+
+def test_report_history_and_idempotency_survive_job_cleanup(setup):
+    client, cluster, body, headers = setup
+    endpoint = '/api/v1/evaluations/runs'
+    run = client.post(endpoint, json=body, headers=headers).json()
+    service = client.app.dependency_overrides[get_service]()
+    service.storage.put('experiments', 'p', run['experiment_id'], {'status': 'COMPLETED', 'items': 6})
+    del cluster.saved[run['id']]
+    historical = client.get(endpoint + '/' + run['id'], headers=headers).json()
+    assert historical['snapshot'] == run['snapshot']
+    assert historical['status'] == 'COMPLETED'
+    assert historical['completed'] == 6
+    assert client.get(endpoint, headers=headers).json()['items'] == [historical]
+    assert client.post(endpoint, json=body, headers=headers).json() == historical
+    assert cluster.created == 1
+    assert client.get(endpoint + '/' + run['id'], headers={**headers, 'X-Project-ID': 'other'}).status_code == 404
 
 
 def test_completion_only_returns_structured_worker_summary(setup):

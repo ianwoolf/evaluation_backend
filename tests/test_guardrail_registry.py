@@ -36,6 +36,23 @@ def test_pinned_endpoint_survives_registry_changes(tmp_path,monkeypatch):
     assert resolve({'id':'shared','provider':'f5'})['address']=='https://changed.test/scans'
     assert 'CANARY_TOKEN' not in json.dumps(connection)
 
+def test_verify_ssl_defaults_on_and_is_pinned_in_runner_detail(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from evaluation_backend import guardrail_runs
+
+    target = {'id': 'shared', 'provider': 'f5'}
+    install(tmp_path, monkeypatch)
+    assert resolve(target)['verify_ssl'] is True
+    install(tmp_path, monkeypatch, verify_ssl=False, token_env=None)
+    connection = resolve(target)
+    install(tmp_path, monkeypatch)
+    context = {'execution_mode': 'guardrail', 'guardrail_connection': connection}
+    service = SimpleNamespace(storage=SimpleNamespace(get=lambda *_: context))
+    monkeypatch.setattr(guardrail_runs, 'verify_worker_token', lambda _: {'project': 'p', 'evaluation': 'run'})
+    assert guardrail_runs.detail('run', 'Bearer fixture', 'p', service)['verify_ssl'] is False
+    del connection['verify_ssl']
+    assert guardrail_runs.detail('run', 'Bearer fixture', 'p', service)['verify_ssl'] is True
+
 @pytest.mark.parametrize('address',['file:///etc/passwd','https://user:pass@guard.test/scans','https://guard.test/scans?token=bad'])
 def test_reject_invalid_endpoint(tmp_path,monkeypatch,address):
     install(tmp_path,monkeypatch,address=address)

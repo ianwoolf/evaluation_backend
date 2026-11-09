@@ -96,7 +96,7 @@ def detail(evaluation: str, authorization: str = Header(default=''),x_project_id
         connection=resolve(context['target'])
     from evaluation_backend.guardrail_registry import credential
     token=credential(connection)
-    return {'endpoint':connection['address'],'token':token,'source':'configured'}
+    return {'endpoint':connection['address'],'token':token,'verify_ssl':connection.get('verify_ssl', True),'source':'configured'}
 
 
 @router.get('/guardrail-reports',dependencies=[Depends(authorize)])

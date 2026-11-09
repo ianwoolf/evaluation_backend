@@ -35,7 +35,7 @@ def build_job(dataset_id, model_id, scorer_ids, *, namespace='evaluation', image
               'EVAL_TARGET_MODE': 'llm', 'EVAL_SCORER_MODE': 'mock' if mock else 'installed'}
     job = {'apiVersion': 'batch/v1', 'kind': 'Job',
             'metadata': {'name': 'eval-' + uuid.uuid4().hex[:20], 'namespace': namespace, 'labels': labels},
-            'spec': {'parallelism':1, 'completions':1, 'backoffLimit': 0, 'activeDeadlineSeconds': 600, 'ttlSecondsAfterFinished': 86400,
+            'spec': {'parallelism':1, 'completions':1, 'backoffLimit': 0, 'activeDeadlineSeconds': 600, 'ttlSecondsAfterFinished': 7200,
                      'template': {'metadata': {'labels': labels}, 'spec': {
                          'serviceAccountName': 'evaluation-worker', 'automountServiceAccountToken': False,
                          'restartPolicy': 'Never',
