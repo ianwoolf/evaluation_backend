@@ -121,7 +121,13 @@ def run(client=None):
         if not hasattr(local,'http'):
             local.http=httpx.Client(timeout=30,trust_env=False,verify=detail.get('verify_ssl', True))
             with lock:clients.append(local.http)
-        return execute_case(ident,di,ri,content,binding,row,local.http,detail)
+        di,sample=execute_case(ident,di,ri,content,binding,row,local.http,detail)
+        try:
+            client.sample(ident,sample)
+        except Exception as error:
+            event('guardrail.sample.persist_failed',level='ERROR',run_id=ident,sample_id=sample['id'],error=error)
+            raise
+        return di,sample
     tasks=iter((di,ri,c,by_dataset[c['dataset_id']],row) for di,c in enumerate(contents) for ri,row in enumerate(c['rows']))
     event('guardrail.pool.started',run_id=ident,count=concurrency)
     try:
@@ -132,7 +138,7 @@ def run(client=None):
                 except StopIteration:return False
                 summary['dataset_results'][args[0]]['status']='RUNNING'
                 pending.add(pool.submit(task,*args));return True
-            # Bounded lookahead keeps execution moving while the main thread persists results.
+            # Each worker persists its own sample before completing the task.
             for _ in range(concurrency*2):
                 if not submit_next():break
             while pending:
@@ -141,8 +147,7 @@ def run(client=None):
                     pending.remove(future)
                     di,sample=future.result()
                     submit_next()
-                    # All persistence and mutable counters belong to this main thread.
-                    client.sample(ident,sample)
+                    # Count only persisted samples; summary mutations stay on this thread.
                     progress=summary['dataset_results'][di]
                     progress['items']+=1;summary['items']+=1
                     if sample['status']=='ERROR':progress['errors']+=1;summary['errors']+=1

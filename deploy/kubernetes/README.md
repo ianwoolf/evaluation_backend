@@ -25,7 +25,7 @@ UI 仓库的对应目录是 `web/deploy/kubernetes`。本目录命令在后端�
 | evaluation-worker | 每次评测动态创建 Job/Pod | worker、LLM proxy、Python collector 是同一容器的子进程，无独立 Deployment |
 
 API 使用单副本 + Recreate，避免本地 RWO 上传卷并行挂载。Worker 的 CPU/内存从已保存
-Environment 版本读取，requests=limits；Job deadline 600s，API 创建的 Job 无完成 TTL、保留到人工清理，失败不自动重试。
+Environment 版本读取，requests=limits。API 创建的测评 Job 无总运行时限，结束后保留 2 小时，失败不自动重试。
 Langfuse Compose 可为历史数据保留，但不属于当前部署依赖。`otel-collector-config.yaml`
 是未启用的外部 Collector 示例，不是 K8s 清单，不要 `kubectl apply -f` 整个目录。
 当前 Python collector 只接收 OTLP HTTP JSON traces，无 OTel Logs/stdout 采集。

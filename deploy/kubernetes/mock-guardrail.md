@@ -1,7 +1,7 @@
 # Local mock Guardrail
 
 Independent deployment: `evaluation-mock-guardrail`, namespace `evaluation`.
-Image: `evaluation-mock-guardrail:scan-20261102`.
+Image: `evaluation-mock-guardrail:random-only-20261111`.
 
 Scan endpoint inside Kubernetes:
 `http://evaluation-mock-guardrail.evaluation.svc.cluster.local:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans`
@@ -12,8 +12,8 @@ ConfigMap `evaluation-mock-guardrail` owns the non-secret endpoint ID.
 
 Build from backend root:
 ```bash
-docker build -f deploy/Dockerfile.mock-guardrail -t evaluation-mock-guardrail:scan-20261102 .
-bash deploy/kubernetes/import-local-image.sh evaluation-mock-guardrail:scan-20261102
+docker build -f deploy/Dockerfile.mock-guardrail -t evaluation-mock-guardrail:random-only-20261111 .
+bash deploy/kubernetes/import-local-image.sh evaluation-mock-guardrail:random-only-20261111
 kubectl --context docker-desktop apply -f deploy/kubernetes/mock-guardrail.yaml
 ```
 The manifest requires the Secret to exist; deployments preserve it.
@@ -25,12 +25,7 @@ kubectl --context docker-desktop -n evaluation port-forward service/evaluation-m
 Health: GET /health. Readiness: GET /ready (requires token configured).
 Interactive API schema: /docs. Scan requests require Authorization.
 
-Input fixture behavior:
-- Ordinary input: cleared.
-- `[mock:unsafe]`: flagged; with flagOnly=false: blocked.
-- `[mock:error]`: HTTP 503.
-- `[mock:timeout]`: immediate HTTP 504, not a delayed network timeout.
-- verbose=true includes one scannerResults entry.
+Each valid, authenticated scan independently returns cleared with 50% probability. The other 50% returns flagged when flagOnly is true and blocked otherwise. Input text has no effect on the draw. Set verbose=true to include one scannerResults entry.
 
 This is a synthetic Scan adapter, not a risk detector. It never receives dataset labels.
 `redacted` responses are not synthesized by this fixture yet. The example scorer accepts them.
@@ -53,7 +48,7 @@ Request logs (2026-11-04): the mock writes structured JSON to stdout for each no
 kubectl -n evaluation logs -f deployment/evaluation-mock-guardrail --since=10m
 ```
 
-Current local image: evaluation-mock-guardrail:request-logs-20261104. No API/UI change is needed for these logs.
 
 
-Random behavior: EVAL_MOCK_GUARDRAIL_FLIP_RATE defaults to 0.1. The [mock:unsafe] marker remains the baseline decision, then each ordinary Scan independently flips safe/unsafe with this probability. Set 0 for deterministic fixture behavior, 1 to always invert. Mock timeout/error markers remain deterministic. Non-finite/out-of-range values return 503. ConfigMap evaluation-mock-guardrail carries the setting; restart/redeploy Mock to pick up changes. Logs include baseline_outcome, flipped and flip_rate; X-Evaluation-Mock-Flipped indicates the same flag. Small datasets may have no flips in a particular run; the rate is probabilistic, not a quota. Current local image: evaluation-mock-guardrail:random-20261104. Git scoring logic is unchanged and still classifies the actual Mock response against the dataset label. Existing reports are not rewritten.
+
+The Git scorer compares the mock response against the dataset label.

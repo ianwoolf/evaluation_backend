@@ -150,8 +150,8 @@ runner 日志应包含 evaluation.environment（包括 guardrailId）和 evaluat
 OTel 当前只支持 HTTP JSON traces，不自动采集 Pod stdout；用 kubectl logs 查看启动日志。
 
 更新 API image 和 EVAL_WORKER_IMAGE 要同步，新 tag 导入所有节点后 rollout。运行中的 Job
-不会自动换镜像。API 创建的 Job 保留到人工清理（不设 TTL），Job deadline 固定 600s、
-backoffLimit=0；不要把 Environment.timeoutSeconds 误认为已控制这个 deadline。
+不会自动换镜像。API 创建的测评 Job 无总运行时限，结束后保留 2 小时，失败不自动重试。
+Environment.timeoutSeconds 不控制测评 Job 的运行时长。
 裸 build_job CLI 模板的 TTL 为 24h，与 API 路径不同。
 
 迁移必须分别处理 ES snapshot、PostgreSQL、Secrets；不要删除 PVC 来解决镜像错误。

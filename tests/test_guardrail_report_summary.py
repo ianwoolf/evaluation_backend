@@ -24,7 +24,7 @@ def test_report_identity_is_run_owned_and_dataset_results_are_independent():
  bindings=[dict(binding_id=i,dataset_id=i,dataset_version=1,sample_count=1,aspect_name='Safety') for i in ('a','b')]
  service.storage.put('run-contexts','p','exp',dict(id='exp',guardrail_bindings=bindings,target={'kind':'GUARDRAIL','provider':'f5','id':'evaluation-config'},guardrail_connection={'provider':'f5','id':'gr','name':'Original Guardrail','registry_revision':'old','token_env':'DO_NOT_EXPOSE'},datasets=[{'dataset_id':'a','name':'Dataset A'},{'dataset_id':'b','name':'Dataset B'}]))
  for i,outcome in [('a','TP'),('b','FN')]:service.storage.put('samples','p',i,{'evaluation_id':'exp','guardrail_result':req(i,i,outcome)})
- result=guardrail_report(service,'p','exp')
+ result=guardrail_report(service.storage.get('run-contexts','p','exp'), service.report_samples('p','exp'))
  assert result['guardrail']['name']=='Original Guardrail' and 'token_env' not in result['guardrail']
  assert result['overall']['recall']==.5
  assert [d['recall'] for d in result['dataset_results']]==[1,0]

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from evaluation_backend.runs import authorize
 from evaluation_backend.content_policy import policy_for
 from evaluation_backend.targets import trace_target
+from . import NotFound
 from .service import DatasetDocument, get_service, now, public
 from evaluation_backend.guardrail_contracts import GuardrailRequestResult
 
@@ -167,17 +168,28 @@ def get_experiment(ident: str, x_project_id: str = Header(min_length=1), service
 @router.get('/reports/{ident}')
 @observed('report.read', project_id='x_project_id', run_id='ident')
 def report(ident: str, x_project_id: str = Header(min_length=1), offset: int = Query(0, ge=0, le=9900),
-           limit: int = Query(100, ge=1, le=100), service=Depends(get_service)):
+           limit: int = Query(100, ge=1, le=100), service=Depends(get_service), summary_only: bool = False):
     """Read by experiment/evaluation ID, not Kubernetes Job name. Results may be partial."""
     experiment = public(service.storage.get('experiments', x_project_id, ident))
-    samples = service.page('samples', x_project_id, filters={'evaluation_id': ident}, offset=offset, limit=limit)
+    try:
+        context = service.storage.get('run-contexts', x_project_id, ident)
+    except NotFound:
+        context = None
+    rows = service.report_samples(x_project_id, ident)
+    samples = {'items': [], 'total': len(rows)} if summary_only else service.page(
+        'samples', x_project_id, filters={'evaluation_id': ident}, offset=offset, limit=limit)
     from evaluation_backend.aspects import aspect_results
     from evaluation_backend.guardrail_report import guardrail_report
-    return {**guardrail_report(service, x_project_id, ident), **aspect_results(service, x_project_id, ident), 'evaluation_id': ident, 'status': experiment['status'], 'experiment': experiment,
-            'datasets': service.dataset_summary(x_project_id, ident, experiment),
+    from evaluation_backend.guardrail_metrics import latency_summary
+    guardrail = guardrail_report(context, rows)
+    sample_latencies = []
+    datasets = service.dataset_summary(experiment, context, rows, latencies=None if guardrail else sample_latencies)
+    latency = guardrail['overall']['latency'] if guardrail else latency_summary(sample_latencies)
+    return {**guardrail, **aspect_results(context, rows), 'evaluation_id': ident, 'status': experiment['status'], 'experiment': experiment,
+            'datasets': datasets, 'latency': latency,
             'results': samples['items'], 'total': samples['total'], 'offset': offset, 'limit': limit,
             'partial': experiment['status'] == 'RUNNING',
-            'nextOffset': offset + limit if offset + limit < samples['total'] else None}
+            'nextOffset': offset + limit if not summary_only and offset + limit < samples['total'] else None}
 
 
 @router.delete('/catalog/{collection}/{ident}')

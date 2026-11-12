@@ -5,10 +5,12 @@ import pytest
 from evaluation_backend import guardrail_worker, git_scorers
 
 @pytest.mark.parametrize('concurrency',[1,3])
-def test_global_case_pool_has_bounded_parallelism_and_single_writer(monkeypatch,concurrency):
+def test_global_case_pool_has_bounded_parallelism_and_concurrent_writers(monkeypatch,concurrency):
     monkeypatch.setenv('EVAL_CONCURRENCY',str(concurrency))
     monkeypatch.setenv('EXPERIMENT_ID','test-run')
     owner=threading.get_ident(); active=0; peak=0; lock=threading.Lock(); closed=[]
+    write_active=0; write_peak=0
+    writers=threading.Barrier(concurrency)
     class Http:
         def __init__(self,**kwargs): assert kwargs['verify'] is False
         def post(self,url,**kwargs):
@@ -27,8 +29,15 @@ def test_global_case_pool_has_bounded_parallelism_and_single_writer(monkeypatch,
                     'guardrail_bindings':[{'dataset_id':d,'binding_id':d,'label_mapping':{'0':'safe'},'scorer_execution':{}} for d in ['a','b']]}
         def call(self,*args):return {'endpoint':'https://mock/scan','token':'fake','verify_ssl':False}
         def sample(self,ident,value):
-            assert threading.get_ident()==owner
-            self.samples.append(copy.deepcopy(value))
+            nonlocal write_active,write_peak
+            assert threading.get_ident()!=owner
+            with lock:
+                write_active+=1
+                write_peak=max(write_peak,write_active)
+            writers.wait(timeout=5)
+            with lock:
+                self.samples.append(copy.deepcopy(value))
+                write_active-=1
         def experiment(self,ident,value):
             assert threading.get_ident()==owner
             self.summaries.append(copy.deepcopy(value))
@@ -37,6 +46,7 @@ def test_global_case_pool_has_bounded_parallelism_and_single_writer(monkeypatch,
     monkeypatch.setattr(git_scorers,'execute',lambda *args:{'expected':'safe','predicted':'safe','outcome':'TN','reason':'test'})
     client=Client();summary=guardrail_worker.run(client)
     assert peak==concurrency
+    assert write_peak==concurrency
     assert len(client.samples)==len({s['id'] for s in client.samples})==12
     assert summary['items']==12 and summary['errors']==1 and summary['status']=='FAILED'
     assert [d['items'] for d in summary['dataset_results']]==[6,6]

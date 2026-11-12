@@ -18,8 +18,7 @@ data:
               "name": "Mock Guardrail",
               "address": "http://evaluation-mock-guardrail:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans",
               "enabled": true,
-              "verify_ssl": true,
-              "token_env": "EVAL_MOCK_GUARDRAIL_TOKEN"
+              "verify_ssl": true
             }
           ]
         },
@@ -32,8 +31,7 @@ data:
               "name": "Mock Guardrail",
               "address": "http://evaluation-mock-guardrail:8002/runtime/v1/endpoints/mock-guardrail/backend/v1/scans",
               "enabled": true,
-              "verify_ssl": true,
-              "token_env": "EVAL_MOCK_GUARDRAIL_TOKEN"
+              "verify_ssl": true
             }
           ]
         }

@@ -48,3 +48,20 @@ def test_expired_unbound_upload_is_deleted(tmp_path):
     store.reconcile(lambda _:False)
     with pytest.raises(UploadError):store.claim('p',u['id'],'d',1,'eval-1','exp-1')
     assert not list(tmp_path.glob('*.json'))
+
+
+def test_group_upload_read_is_scoped_to_members_and_expires(tmp_path, monkeypatch):
+    store=UploadStore(tmp_path)
+    upload=store.create('p','d',1,SCHEMA,parse_upload(CSV,'cases.csv',SCHEMA))['id']
+    store.claim_many('p',[(upload,'d',1)],'job1','exp1',group_id='group')
+    with pytest.raises(UploadError):store.read('p',upload,'other')
+    with pytest.raises(UploadError):store.claim_many('p',[(upload,'d',1)],'job2','exp2',group_id='other')
+    store.claim_many('p',[(upload,'d',1)],'job2','exp2',group_id='group')
+    assert store.read('p',upload,'exp1')==store.read('p',upload,'exp2')
+    import time
+    future=time.time()+86401
+    monkeypatch.setattr('evaluation_backend.uploads.time.time',lambda:future)
+    store.reconcile(lambda _:True)
+    assert not list(tmp_path.glob('*.json'))
+    with store.connect() as db:
+        assert not db.execute('SELECT 1 FROM upload_group_claims').fetchall()

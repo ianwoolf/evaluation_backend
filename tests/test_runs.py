@@ -39,6 +39,7 @@ class Cluster:
 def setup(monkeypatch):
     binding = {'target_id': 'g', 'dataset_id': 'd', 'dataset_version': 1, 'environment_id': 'e', 'model_id': 'glm-dev', 'langfuse_dataset_id': 'real-d', 'langfuse_dataset_version': '2026-10-19T12:00:00Z'}
     monkeypatch.setenv('EVAL_TRIGGER_TOKEN', 'secret')
+    monkeypatch.setenv('EVAL_GUARDRAIL_TOKEN', 'guardrail-test-token')
     monkeypatch.setenv('EVAL_WORKER_IMAGE', 'ianwoolf/evaluation-worker:test')
     monkeypatch.setenv('EVAL_PUBLIC_LANGFUSE_URL', 'http://localhost:3000')
     cluster = Cluster()
@@ -74,11 +75,16 @@ def test_launch_idempotency_pinning_and_project_isolation(setup):
     job = cluster.saved[run['id']]
     env = {e['name']: e['value'] for e in job['spec']['template']['spec']['containers'][0]['env'] if 'value' in e}
     assert job['spec']['ttlSecondsAfterFinished'] == 7200
+    assert 'activeDeadlineSeconds' not in job['spec']
     assert job['spec']['parallelism'] == job['spec']['completions'] == 1
     assert env['EVAL_CONCURRENCY'] == '3'
     assert env['DATASET_ID'] == 'd'
     assert env['EVAL_DATASET_VERSION'] == '1'
     assert env['EVAL_RUN_INPUT_ID'] == run['experiment_id']
+    from evaluation_backend.run_auth import verify_worker_token
+    assert verify_worker_token(env['EVAL_STORAGE_TOKEN']) == {
+        'project': headers['X-Project-ID'], 'evaluation': run['experiment_id'], 'expires': None,
+    }
     assert env['EXPERIMENT_ID'] == env['EVALUATE_ID'] == run['experiment_id']
     assert job['spec']['template']['spec']['automountServiceAccountToken'] is False
     assert client.get('/api/v1/evaluations/runs/' + run['id'], headers={**headers, 'X-Project-ID': 'other'}).status_code == 404

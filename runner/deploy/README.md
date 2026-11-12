@@ -49,9 +49,9 @@ OTel Logs；当前采集的是 traces。模型 none 时不启动 proxy、不创�
 Environment CPU(m) / Memory(Mi) 写入 Pod requests 与 limits：1000m=1 CPU core、1024Mi=1Gi。
 配置快照也包含 timeoutSeconds、runner、network、路径、commands 和 intercept 开关；
 **日志表示收到的配置，不表示每个配置已经被 K8s 强制执行**。当前 API 路径：
-并发由 runtime 的 EVAL_CONCURRENCY（默认 1）决定，Job activeDeadlineSeconds=600，
+并发由 runtime 的 EVAL_CONCURRENCY（默认 1）决定，Job 无总运行时限，
 backoffLimit=0。没有根据 network/路径字段自动生成 NetworkPolicy 或 sandbox policy。
-API 创建的 Job 不设完成 TTL；CLI build_job 的裸模板为 24h。不要用裸模板替代 API Trigger，
+Job 完成后保留 2 小时。不要用裸模板替代 API Trigger，
 它缺少运行上下文、临时输入及签名 token。
 
 ## 验证与日志

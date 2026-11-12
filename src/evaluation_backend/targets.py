@@ -4,6 +4,7 @@ import os
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from evaluation_backend.guardrail_contracts import ProviderId
 from evaluation_backend.runs import authorize
 from evaluation_backend.storage import Conflict, NotFound
 from evaluation_backend.storage.service import get_service, public
@@ -15,7 +16,7 @@ class Target(BaseModel):
     id: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
     name: str = Field(min_length=1, max_length=200)
     kind: Literal['GUARDRAIL'] = 'GUARDRAIL'
-    provider: Literal['f5', 'nemo guardrail'] | None = None
+    provider: ProviderId | None = None
     version: int = Field(ge=1, strict=True)
     definition: str = Field(default='', max_length=4000)
     guardrail_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')

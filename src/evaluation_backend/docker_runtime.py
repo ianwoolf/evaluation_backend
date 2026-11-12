@@ -4,7 +4,6 @@ import os
 import struct
 import hashlib
 from contextlib import nullcontext
-from datetime import datetime, timezone
 from urllib.parse import quote
 import httpx
 from fastapi import HTTPException
@@ -56,14 +55,11 @@ class DockerRuntime:
     def job(self, container):
         record = json.loads(container['Config']['Labels'][RECORD])
         state = container['State']
-        if state.get('Running') and state.get('StartedAt'):
-            started = datetime.fromisoformat(state['StartedAt'].replace('Z', '+00:00'))
-            if (datetime.now(timezone.utc) - started).total_seconds() > record['spec'].get('activeDeadlineSeconds', 600):
-                self.request('POST', '/containers/' + container['Id'] + '/stop', params={'t': 5})
-                state = self.inspect(container['Id'])['State']
-                event('docker.workload.timed_out', level='ERROR', job_name=record['metadata']['name'])
         record['metadata']['creationTimestamp'] = container['Created']
         record['status'] = {}
+        if state.get('Status') != 'created':
+            record['spec'].pop('suspend', None)
+            record['metadata']['annotations'].pop('evaluation.tasklattice.io/wait-for', None)
         if state.get('Running'): record['status']['active'] = 1
         elif state.get('Status') in ('exited', 'dead'):
             record['status']['conditions'] = [{'type': 'Complete' if state.get('ExitCode') == 0 else 'Failed', 'status': 'True'}]
@@ -95,7 +91,9 @@ class DockerRuntime:
         memory = str(resources.get('memory', '2048Mi'))
         memory = int(memory[:-2]) * 1024 * 1024 if memory.endswith('Mi') else int(memory)
         # Labels persist public metadata only. No environment or credentials.
-        record = {'metadata': job['metadata'], 'spec': {'activeDeadlineSeconds': job['spec'].get('activeDeadlineSeconds', 600)}}
+        record = {'metadata': job['metadata'], 'spec': {}}
+        if job['spec'].get('suspend'):
+            record['spec']['suspend'] = True
         name = job['metadata']['name']
         labels = {OWNER: 'evaluation-backend', RECORD: json.dumps(record), NETWORK: self.network,
                   'evaluation.job': name, 'evaluation.project': job['metadata']['labels']['project']}
@@ -109,7 +107,8 @@ class DockerRuntime:
                               '/home/worker': 'rw,nosuid,size=134217728,uid=10001,gid=10001'},
                     'RestartPolicy': {'Name': 'no'}}}
         created = self.request('POST', '/containers/create', params={'name': self.container_name(name)}, json=body).json()
-        self.request('POST', '/containers/' + created['Id'] + '/start')
+        if not job['spec'].get('suspend'):
+            self.request('POST', '/containers/' + created['Id'] + '/start')
         event('docker.workload.created', job_name=name)
         return self.job(self.inspect(created['Id']))
 
@@ -134,6 +133,11 @@ class DockerRuntime:
             return {'items': [self.job(self.inspect(item['Id'])) for item in values]}
         if method == 'GET' and path.startswith(self.jobs + '/'):
             return self.job(self.inspect(path.rsplit('/', 1)[1]))
+        if method == 'PATCH' and path.startswith(self.jobs + '/') and kwargs['json']['spec'].get('suspend') is False:
+            container = self.inspect(path.rsplit('/', 1)[1])
+            if container['State'].get('Status') == 'created' and self.job(container)['spec'].get('suspend'):
+                self.request('POST', '/containers/' + container['Id'] + '/start')
+            return {}
         if method == 'GET' and path.endswith('/pods'):
             name = kwargs.get('params', {}).get('labelSelector', '').removeprefix('job-name=')
             return {'items': [{'metadata': {'name': self.inspect(name)['Id']}}]}

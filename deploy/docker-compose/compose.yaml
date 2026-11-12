@@ -43,7 +43,7 @@ services:
       dockerfile: Dockerfile.worker
     entrypoint: [python, -m, uvicorn, 'evaluation_backend.api:app', --host, 0.0.0.0, --port, '8001', --no-access-log]
     environment:
-      EVAL_MOCK_GUARDRAIL_TOKEN_FILE: /run/secrets/guardrail_token
+      EVAL_GUARDRAIL_TOKEN_FILE: /run/secrets/guardrail_token
       EVAL_CONFIG_FILE: /config/backend.env
       EVAL_GUARDRAIL_REGISTRY: /config/guardrails.json
       EVAL_DOCKER_NETWORK: ${EVAL_NETWORK:-evaluation-compose}

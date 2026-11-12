@@ -2,6 +2,17 @@
 import math
 
 
+def latency_summary(values):
+    times = sorted(values)
+    count = len(times)
+
+    def percentile(p):
+        return times[math.ceil(p * count) - 1] if count else None
+
+    return {'average_ms': sum(times) / count if count else None,
+            'p50_ms': percentile(.5), 'p95_ms': percentile(.95), 'count': count}
+
+
 def summarize_requests(requests, bindings):
     groups = {b['binding_id']: {**b, 'TP': 0, 'FP': 0, 'TN': 0, 'FN': 0,
               'errors': 0, 'processed': 0, 'latencies': [], 'cost': 0.0} for b in bindings}
@@ -33,11 +44,6 @@ def summarize_requests(requests, bindings):
     result = []
     def ratio(a, b):
         return a / b if b else None
-    def percentile(values, p):
-        if not values:
-            return None
-        # Nearest-rank percentile; stable for small acceptance datasets.
-        return sorted(values)[max(0, math.ceil(p * len(values)) - 1)]
     for g in groups.values():
         tp, fp, tn, fn = [g[k] for k in ('TP', 'FP', 'TN', 'FN')]
         valid = tp + fp + tn + fn
@@ -48,8 +54,7 @@ def summarize_requests(requests, bindings):
             'recall': ratio(tp, tp+fn), 'f1': ratio(2*tp, 2*tp+fp+fn),
             'fpr': ratio(fp, fp+tn), 'fnr': ratio(fn, fn+tp),
             'coverage': ratio(valid, g['processed']),
-            'latency': {'average_ms': ratio(sum(times), len(times)),
-                        'p50_ms': percentile(times, .5), 'p95_ms': percentile(times, .95)},
+            'latency': latency_summary(times),
             'cost': {'amount': amount, 'currency': 'USD', 'source': 'mock'}})
     return result
 
@@ -71,10 +76,8 @@ def aggregate_results(requests, bindings):
         if r.get('http_status') is not None or r.get('sent',False):times.append(r['guardrail_latency_ms'])
     tp,fp,tn,fn=[counts[k] for k in ('TP','FP','TN','FN')]
     def ratio(a,b):return a/b if b else None
-    times.sort()
-    def pct(p):return times[max(0,math.ceil(p*len(times))-1)] if times else None
     valid=tp+fp+tn+fn
     return {**counts,'precision':ratio(tp,tp+fp),'recall':ratio(tp,tp+fn),'accuracy':ratio(tp+tn,valid),'f1':ratio(2*tp,2*tp+fp+fn),
             'processed':len(selected),'errors':errors,'valid_count':valid,'sample_count':sum(b.get('sample_count',0) for b in bindings),
             'pending':max(0,sum(b.get('sample_count',0) for b in bindings)-len(selected)),
-            'latency':{'average_ms':ratio(sum(times),len(times)),'p50_ms':pct(.5),'p95_ms':pct(.95),'count':len(times)}}
+            'latency':latency_summary(times)}

@@ -1,4 +1,5 @@
 """Authenticated, project-scoped evaluation Jobs. Kubernetes stores run snapshots."""
+from evaluation_backend.guardrail_contracts import ProviderId
 from evaluation_backend.observability import observed
 from evaluation_backend.observability import event
 import hashlib
@@ -22,6 +23,7 @@ from evaluation_backend.uploads import get_upload_store, UploadError
 
 router = APIRouter(prefix='/api/v1/evaluations')
 PREFIX = 'evaluation.tasklattice.io/'
+WAIT_FOR = PREFIX + 'wait-for'
 
 
 async def authorize(request: Request, authorization: str = Header(default='')):
@@ -45,10 +47,12 @@ class DatasetSelection(BaseModel):
 
 class StartRun(BaseModel):
     model_config = ConfigDict(extra='forbid')
+    concurrency: int | None = Field(default=None, ge=1, le=32, strict=True)
+    concurrency_group: str | None = Field(default=None, pattern=r'^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
     execution_mode: Literal['legacy', 'guardrail'] = 'legacy'
     guardrail_bindings: list[dict] | None = None
     config_revision: str | None = None
-    guardrail_provider: Literal['f5','nemo guardrail'] | None = None
+    guardrail_provider: ProviderId | None = None
     guardrail_instance_id: str | None = None
     name: str = Field(default="", max_length=200)
     target_id: str
@@ -75,11 +79,13 @@ class Kubernetes:
         self.ca = str(root / 'ca.crt')
 
     @observed('kubernetes.request', method='method')
-    def call(self, method, path, **kwargs):
+    def call(self, method, path, *, content_type=None, **kwargs):
         import ssl
+        headers = {'Authorization': 'Bearer ' + self.token_file.read_text().strip()}
+        if content_type:
+            headers['Content-Type'] = content_type
         with httpx.Client(verify=ssl.create_default_context(cafile=self.ca), trust_env=False, timeout=20) as client:
-            response = client.request(method, self.base + path,
-                headers={'Authorization': 'Bearer ' + self.token_file.read_text().strip()}, **kwargs)
+            response = client.request(method, self.base + path, headers=headers, **kwargs)
         if response.status_code == 404:
             raise HTTPException(404, 'Evaluation not found')
         if response.status_code == 409:
@@ -116,7 +122,7 @@ def summary(job, cluster, service=None, project=None):
     record = json.loads(annotation[PREFIX + 'record'])
     conditions = {c['type'] for c in job.get('status', {}).get('conditions', []) if c.get('status') == 'True'}
     status = 'COMPLETED' if 'Complete' in conditions else 'FAILED' if 'Failed' in conditions else 'RUNNING'
-    if job.get('spec', {}).get('suspend'):
+    if job.get('spec', {}).get('suspend') and WAIT_FOR not in annotation:
         status = 'CANCELLED'
     result = {}
     error = ''
@@ -125,7 +131,12 @@ def summary(job, cluster, service=None, project=None):
         if pods.get('items'):
             pod = pods['items'][0]
             # Only expose the worker's structured summary, never raw upstream logs.
-            logs = cluster.call('GET', f"/api/v1/namespaces/{cluster.namespace}/pods/{pod['metadata']['name']}/log", params={'tailLines': 100})
+            try:
+                logs = cluster.call('GET', f"/api/v1/namespaces/{cluster.namespace}/pods/{pod['metadata']['name']}/log", params={'tailLines': 100})
+            except HTTPException as error:
+                if error.status_code != 404:
+                    raise
+                logs = ''  # The Pod may be removed between listing and reading logs.
             for line in str(logs).splitlines():
                 try:
                     value = json.loads(line)
@@ -179,7 +190,7 @@ def persisted_run(context, service, project):
                  if key in selection} for selection in selections]
     primary = next((selection for selection in datasets if selection['dataset_id'] == dataset_id), {})
     environment = context['environment']
-    record = {key: context[key] for key in ('execution_mode', 'feature_modes', 'target_id', 'environment_id',
+    record = {key: context[key] for key in ('execution_mode', 'feature_modes', 'target_id', 'environment_id', 'concurrency', 'concurrency_group', 'serial_index',
                                             'environment_version', 'dataset_version', 'scoring_mode', 'scorer_selection') if key in context}
     return {**record, 'id': context['job_name'], 'experiment_id': context['id'],
             'name': context['name'], 'created_at': context['created_at'], 'status': status, 'phase': status,
@@ -211,15 +222,30 @@ def configuration():
             'target_mode': 'llm', 'scorer_ids': ['mock-score', 'sc-risk']}
 
 
+def run_job_name(project, key):
+    return 'eval-' + hashlib.sha256((project + ':' + key).encode()).hexdigest()[:24]
+
+
 @router.post('/runs', dependencies=[Depends(authorize)])
-@observed('evaluation.trigger', project_id='x_project_id')
 def start(request: StartRun, x_project_id: str = Header(min_length=1),
           idempotency_key: str = Header(min_length=16, max_length=128), cluster=Depends(kube), service=Depends(get_service)):
+    return start_run(request, x_project_id, idempotency_key, cluster, service)
+
+
+@observed('evaluation.trigger', project_id='x_project_id')
+def start_run(request, x_project_id, idempotency_key, cluster, service, *, wait_for=None, serial_levels=None, connection=None):
     if request.datasets is not None and request.upload_id:
         raise HTTPException(422, 'Specify uploads per dataset')
     # Idempotency is checked before touching temporary content (which may already be deleted).
-    digest = hashlib.sha256(json.dumps(request.model_dump(), sort_keys=True).encode()).hexdigest()
-    name = 'eval-' + hashlib.sha256((x_project_id + ':' + idempotency_key).encode()).hexdigest()[:24]
+    request_data = request.model_dump()
+    if wait_for is not None:
+        request_data['wait_for'] = wait_for
+        request_data['serial_levels'] = serial_levels
+    for field in ('concurrency', 'concurrency_group'):
+        if request_data[field] is None:
+            del request_data[field]
+    digest = hashlib.sha256(json.dumps(request_data, sort_keys=True).encode()).hexdigest()
+    name = run_job_name(x_project_id, idempotency_key)
     experiment = 'exp-' + hashlib.sha256((x_project_id + ':' + idempotency_key).encode()).hexdigest()[:32]
     event('evaluation.identified', project_id=x_project_id, run_id=experiment, job_name=name,
           dataset_id=request.dataset_id, target_id=request.target_id, environment_id=request.environment_id)
@@ -249,7 +275,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     environment = environment_version(service, x_project_id, request.environment_id, request.environment_version)
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
-    concurrency=environment.get('runner',{}).get('concurrency',1)
+    concurrency = request.concurrency or environment.get('runner', {}).get('concurrency', 1)
     if type(concurrency) is not int or not 1<=concurrency<=32:raise HTTPException(422,'Environment case concurrency must be 1..32')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
     if request.resources is not None and request.resources != resources:
@@ -268,7 +294,6 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
             raise HTTPException(422, 'Run must use the configured environment and execution mode')
         allowed = {(d['dataset_id'],d['dataset_version']) for d in configured_datasets(config)}
         requested = request.datasets or [DatasetSelection(dataset_id=request.dataset_id,dataset_version=request.dataset_version)]
-        if any(s.upload_id or (s.dataset_id,s.dataset_version) not in allowed for s in requested): raise HTTPException(422, 'Select only configured dataset versions')
         if len(requested)!=len(allowed) or {(s.dataset_id,s.dataset_version) for s in requested}!=allowed:raise HTTPException(422,'Use all datasets from the configured Evaluation version')
         target={**target,'provider':request.guardrail_provider or target.get('provider'),'guardrail_id':request.guardrail_instance_id or target.get('guardrail_id')}
         request.guardrail_bindings = config.get('guardrail_bindings')
@@ -282,9 +307,14 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     versions = [service.dataset_version(x_project_id, s.dataset_id, s.dataset_version) for s in selections]
     version = versions[0]
     from evaluation_backend.scorer_selection import resolve_scorers
+    guardrail_connection = None
     if request.execution_mode == 'guardrail':
-        from evaluation_backend.guardrail_runs import resolve_bindings
-        guardrail_bindings = resolve_bindings(service, x_project_id, target, environment, selections, versions, request.guardrail_bindings)
+        from evaluation_backend.guardrail_runs import resolve_bindings, validate_uploaded_rows
+        from evaluation_backend.guardrail_registry import resolve, credential
+        guardrail_connection = connection if connection is not None else resolve(target, service, x_project_id)
+        credential()
+        guardrail_bindings = resolve_bindings(service, x_project_id, target, environment, selections, versions,
+                                             request.guardrail_bindings, validate_connection=False)
     else:
         guardrail_bindings = []
     try:
@@ -293,18 +323,36 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     except ValueError as error:
         raise HTTPException(422, str(error)) from None
     dataset_records = []
-    for selected, content in zip(selections, versions):
-        size = len(content['rows'])
-        if selected.upload_id:
-            try: size = get_upload_store().claim(x_project_id, selected.upload_id, selected.dataset_id, selected.dataset_version, name, experiment)
-            except UploadError as error: raise HTTPException(422, str(error)) from None
-        if request.datasets is not None and not size:
-            raise HTTPException(422, 'Dataset has no samples: ' + selected.dataset_id)
-        dataset_records.append({**selected.model_dump(), 'name': content['name'], 'sample_count': size,
-                                **bindings[len(dataset_records)], 'objective': content.get('objective','')})
+    uploads = []
     from evaluation_backend.aspects import snapshot_scorers
-    for d in dataset_records:
-        d['scorer_bindings'] = snapshot_scorers(service, x_project_id, d['scorer_ids'], d['scorer_metadata'])
+    for selected, content in zip(selections, versions):
+        size = 0 if selected.upload_id else len(content['rows'])
+        if not selected.upload_id and request.datasets is not None and not size:
+            raise HTTPException(422, 'Dataset has no samples: ' + selected.dataset_id)
+        if selected.upload_id:
+            uploads.append((selected.upload_id, selected.dataset_id, selected.dataset_version))
+        binding = bindings[len(dataset_records)]
+        dataset_records.append({
+            **selected.model_dump(), 'name': content['name'], 'sample_count': size,
+            **binding, 'objective': content.get('objective', ''),
+            'scorer_bindings': snapshot_scorers(service, x_project_id, binding['scorer_ids'], binding['scorer_metadata']),
+        })
+    if uploads:
+        guardrail_by_dataset = {b['dataset_id']: b for b in guardrail_bindings}
+        def validate(dataset, content):
+            validate_uploaded_rows(content, guardrail_by_dataset[dataset])
+        try:
+            counts = get_upload_store().claim_many(
+                x_project_id, uploads, name, experiment,
+                max_rows=10000 - sum(d['sample_count'] for d in dataset_records),
+                validate=validate if guardrail_bindings else None, group_id=request.concurrency_group)
+        except UploadError as error:
+            raise HTTPException(422, str(error)) from None
+        for record in dataset_records:
+            if record['upload_id']:
+                record.update(sample_count=counts[record['upload_id']], input_source='upload')
+                if guardrail_bindings:
+                    guardrail_by_dataset[record['dataset_id']]['sample_count'] = record['sample_count']
     count = sum(d['sample_count'] for d in dataset_records)
     if (request.datasets is not None and not count) or count > 10000:
         raise HTTPException(422, 'An evaluation requires 1 to 10,000 samples across all datasets')
@@ -319,14 +367,15 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
                    environment_version=request.environment_version, scorer_ids=request.scorer_ids,
                    scoring_mode=request.scoring_mode, total_samples=count,
                    created_at=datetime.now(timezone.utc).isoformat())
-    if request.execution_mode == 'guardrail':
-        from evaluation_backend.guardrail_registry import resolve
-        context['guardrail_connection'] = resolve(target)
-        if os.getenv('EVAL_GUARDRAIL_REGISTRY'):
-            from evaluation_backend.guardrail_registry import credential
-            credential(context['guardrail_connection'])
+    if guardrail_connection is not None:
+        context['guardrail_connection'] = guardrail_connection
     context['evaluation_config_id']=request.target_id
     context['evaluation_config_version']=target['version']
+    context['concurrency'] = concurrency
+    if request.concurrency_group:
+        context['concurrency_group'] = request.concurrency_group
+    if wait_for is not None:
+        context['serial_index'] = len(wait_for)
     context['execution_mode'] = request.execution_mode
     context['guardrail_bindings'] = guardrail_bindings
     context['scoring_selections'] = dataset_records
@@ -347,12 +396,15 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         if context['request_hash'] != digest: raise HTTPException(409, 'Idempotency conflict')
     target = context.get('target', target)
     environment = context.get('environment', environment)
-    concurrency=environment.get('runner',{}).get('concurrency',1)
+    concurrency = context.get('concurrency', concurrency)
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
     snapshot = context.get('report_snapshot', snapshot)
     record = {k: v for k,v in request.model_dump().items() if k not in ('snapshot', 'upload_id')}
+    record['concurrency'] = concurrency
+    if wait_for is not None:
+        record['serial_index'] = len(wait_for)
     record['feature_modes'] = context.get('feature_modes', feature_modes)
     record.update(name=context.get('name', request.name.strip() or generated_name), snapshot=snapshot, sample_count=count, resources=resources.model_dump())
     record['datasets'] = [{k: v for k, v in d.items() if k not in ('upload_id','scorer_metadata','scorer_bindings')} for d in dataset_records]
@@ -363,6 +415,9 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
     job['metadata']['name'] = name
     job['metadata']['labels']['project'] = project_label(x_project_id)
     job['metadata']['annotations'] = {PREFIX + 'project': x_project_id, PREFIX + 'record': json.dumps(record), PREFIX + 'request-hash': digest}
+    if wait_for is not None:
+        job['spec']['suspend'] = True
+        job['metadata']['annotations'][WAIT_FOR] = json.dumps(wait_for)
     job['spec']['template']['spec']['containers'][0]['env'].extend([
         {'name':'EVAL_JUDGE_MODEL_IDS','value':json.dumps(sorted({c['execution']['model_id'] for b in bindings for c in b['scorer_metadata'].get('evaluation',{}).get('scorers',{}).values() if c.get('execution',{}).get('engine')=='llm_judge'}))},
         {'name':'EVAL_CONCURRENCY','value':str(concurrency)},
@@ -371,7 +426,7 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
         {'name': 'EVAL_PLATFORM', 'value': 'storage'},
         {'name': 'EVAL_PROJECT_ID', 'value': x_project_id},
         {'name': 'EVAL_RUN_INPUT_ID', 'value': experiment},
-        {'name': 'EVAL_STORAGE_TOKEN', 'value': issue_worker_token(x_project_id, experiment)},
+        {'name': 'EVAL_STORAGE_TOKEN', 'value': issue_worker_token(x_project_id, experiment, ttl=None)},
         {'name': 'EVAL_TARGET_SNAPSHOT', 'value': json.dumps(target)},
         {'name': 'EVAL_GUARDRAIL_ID', 'value': environment['guardrailId']},
         {'name': 'EVAL_ENVIRONMENT_SNAPSHOT', 'value': json.dumps({**environment, 'id': request.environment_id})},

@@ -12,7 +12,7 @@ import httpx
 
 from . import Conflict, NotFound, StorageError
 
-COLLECTIONS = {'datasets', 'traces', 'scores', 'experiments', 'samples', 'run-contexts', 'environments', 'target-configs', 'targets', 'scorers', 'archives'}
+COLLECTIONS = {'datasets', 'traces', 'scores', 'experiments', 'samples', 'run-contexts', 'environments', 'target-configs', 'targets', 'scorers', 'archives', 'guardrail-registries'}
 
 
 class ElasticsearchStorage:
@@ -175,10 +175,29 @@ class ElasticsearchStorage:
         if result.get('errors') or any(item.get('index',{}).get('status',500)>=300 for item in result.get('items',[])):
             raise StorageError('Elasticsearch trace batch contains failed writes')
 
+    @observed('storage.run.delete', project_id='project', run_id='ident')
+    def delete_run(self, project, ident):
+        """Delete the evidence first and the shared run/context document last."""
+        counts = {}
+        for collection, field in (('samples', 'run_id'), ('traces', 'evaluation_id')):
+            result = self.call('POST', f'/{self.index(collection)}/_delete_by_query',
+                params={'refresh': 'true'}, json={'query': {'bool': {'filter': [
+                    {'term': {'project_id': project}}, {'term': {field: ident}},
+                ]}}})
+            if result.get('failures') or result.get('timed_out') or result.get('version_conflicts'):
+                raise StorageError(f'Could not fully delete run {collection}. Retry cleanup.')
+            counts[collection] = result['deleted']
+        try:
+            self.call('DELETE', f'/{self.index("experiments")}/_doc/{self.record_key("experiments", project, ident)}',
+                      params={'refresh': 'wait_for'})
+        except NotFound:
+            pass
+        return counts
+
     @observed('storage.search', collection='collection', project_id='project')
-    def search(self, collection, project, *, filters=None, offset=0, limit=100):
+    def search(self, collection, project, *, filters=None, offset=0, limit=100, include_evidence=True):
         if collection != 'traces':
-            return self.search_records(collection, project, filters=filters, offset=offset, limit=limit)
+            return self.search_records(collection, project, filters=filters, offset=offset, limit=limit, include_evidence=include_evidence)
         terms = [{'term': {'project_id': project}}]
         for name, value in (filters or {}).items():
             if name not in {'evaluation_id', 'sample_id', 'dataset_id', 'scorer_id', 'status'}:
@@ -265,7 +284,9 @@ class ElasticsearchStorage:
         index = self.index(collection)
         params = {'refresh': 'wait_for', **self.revision_params(revision)}
         doc = {**value, 'project_id': project, 'id': ident}
-        if collection in ('targets', 'scorers', 'archives'):
+        if collection == 'guardrail-registries':
+            doc.update(record_type='guardrail-registry', updated_at=datetime.now(timezone.utc).isoformat())
+        elif collection in ('targets', 'scorers', 'archives'):
             doc = {'project_id': project, 'record_type': {'targets':'target','scorers':'scorer','archives':'archive'}[collection], 'id': ident, 'state': 'head',
                    'version': value.get('version', len(value.get('versions', []))), 'spec': value,
                    'updated_at': datetime.now(timezone.utc).isoformat()}
@@ -342,7 +363,7 @@ class ElasticsearchStorage:
         return {**value, **({'version': version} if collection == 'target-configs' else {}),
                 '_revision': f"{hit['_seq_no']}:{hit['_primary_term']}"}
 
-    def search_records(self, collection, project, *, filters=None, offset=0, limit=100):
+    def search_records(self, collection, project, *, filters=None, offset=0, limit=100, include_evidence=True):
         terms = [{'term': {'project_id': project}}]
         if collection in ('targets', 'scorers', 'archives'):
             terms.extend([{'term': {'record_type': {'targets':'target','scorers':'scorer','archives':'archive'}[collection]}}, {'term': {'state': 'head'}}])
@@ -359,9 +380,11 @@ class ElasticsearchStorage:
             if name not in {'evaluation_id', 'sample_id', 'dataset_id', 'status'}:
                 raise ValueError('Unsupported search filter')
             terms.append({'term': {'run_id' if name == 'evaluation_id' else name: value}})
-        result = self.call('POST', f'/{self.index(collection)}/_search', json={
-            'query': {'bool': {'filter': terms}}, 'sort': [{'id': 'asc'}], 'from': offset,
-            'size': limit, 'track_total_hits': True, 'seq_no_primary_term': True})
+        query = {'query': {'bool': {'filter': terms}}, 'sort': [{'id': 'asc'}], 'from': offset,
+                 'size': limit, 'track_total_hits': True, 'seq_no_primary_term': True}
+        if collection == 'samples' and not include_evidence:
+            query['_source'] = ['sample_id', 'dataset_id', 'status', 'latency_ms', 'scores', 'guardrail_result']
+        result = self.call('POST', f'/{self.index(collection)}/_search', json=query)
         return {'items': [self.decode(collection, h) for h in result['hits']['hits']],
                 'total': result['hits']['total']['value']}
 

@@ -24,7 +24,7 @@ class DatasetContent(BaseModel):
     evaluation_type: Literal['generic', 'guardrail'] = 'generic'
     guardrail: GuardrailDatasetConfig | None = None
     name: str = Field(min_length=1)
-    objective: str = Field(min_length=1)
+    objective: str = ''
     description: str = ''
     tags: list[str] = Field(default_factory=list)
     targets: list[str] = Field(default_factory=list)
@@ -181,12 +181,17 @@ class EvaluationStorageService:
         return [{**{k: v for k, v in g.items() if k != 'sum'},
                  'average': g['sum'] / g['scored_samples']} for g in groups.values()]
 
-    def dataset_summary(self, project, evaluation_id, experiment):
-        """Aggregate all pages, never just the visible sample page. No vendor coupling."""
-        try:
-            context = self.storage.get('run-contexts', project, evaluation_id)
-        except NotFound:
-            context = experiment
+    def report_samples(self, project, evaluation_id):
+        samples = []
+        while True:
+            page = self.storage.search('samples', project, filters={'evaluation_id': evaluation_id},
+                                       offset=len(samples), limit=500, include_evidence=False)
+            samples.extend(page['items'])
+            if not page['items'] or len(samples) >= page['total']:
+                return samples
+
+    def dataset_summary(self, experiment, context, samples, *, latencies=None):
+        context = context or experiment
         selections = context.get('datasets') or [{'dataset_id': context.get('dataset_id', experiment.get('dataset_id')),
             'dataset_version': context.get('dataset_version', experiment.get('dataset_version')),
             'sample_count': context.get('total_samples', experiment.get('items', 0))}]
@@ -198,24 +203,21 @@ class EvaluationStorageService:
             groups[ident] = {k: selected.get(k) for k in ('dataset_id', 'dataset_version', 'name', 'sample_count')}
             groups[ident].update(status=outcome.get('status', experiment['status'] if len(selections) == 1 else 'QUEUED'),
                 completed=0, passed=0, failed=0, errors=0, latency_sum=0, scores={})
-        cursor = 0
-        while True:
-            page = self.storage.search('samples', project, filters={'evaluation_id': evaluation_id}, offset=cursor, limit=100)
-            for sample in page['items']:
-                ident = sample.get('dataset_id') or selections[0]['dataset_id']
-                if ident not in groups: continue
-                group = groups[ident]
-                group['completed'] += 1
-                group[{'PASS': 'passed', 'FAIL': 'failed', 'ERROR': 'errors'}[sample['status']]] += 1
-                group['latency_sum'] += sample.get('latencyMs', 0)
-                for score in sample.get('scores', []):
-                    key = (score['scorerId'], score.get('scorerVersion'))
-                    metric = group['scores'].setdefault(key, {'scorer_id': key[0], 'scorer_version': key[1], 'count': 0, 'passed': 0, 'sum': 0})
-                    metric['count'] += 1
-                    metric['passed'] += int(score['passed'])
-                    metric['sum'] += score['value']
-            cursor += len(page['items'])
-            if not page['items'] or cursor >= page['total']: break
+        for sample in samples:
+            ident = sample.get('dataset_id') or selections[0]['dataset_id']
+            if ident not in groups: continue
+            group = groups[ident]
+            group['completed'] += 1
+            group[{'PASS': 'passed', 'FAIL': 'failed', 'ERROR': 'errors'}[sample['status']]] += 1
+            group['latency_sum'] += sample.get('latencyMs', 0)
+            if latencies is not None and sample.get('latencyMs') is not None:
+                latencies.append(sample['latencyMs'])
+            for score in sample.get('scores', []):
+                key = (score['scorerId'], score.get('scorerVersion'))
+                metric = group['scores'].setdefault(key, {'scorer_id': key[0], 'scorer_version': key[1], 'count': 0, 'passed': 0, 'sum': 0})
+                metric['count'] += 1
+                metric['passed'] += int(score['passed'])
+                metric['sum'] += score['value']
         results = []
         for group in groups.values():
             count = group['completed']

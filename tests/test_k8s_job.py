@@ -23,6 +23,8 @@ def test_fresh_identity_and_secret_references():
     assert 'LANGFUSE_SECRET_KEY' not in json.dumps(a)
     assert not pod['spec']['automountServiceAccountToken']
     assert a['spec']['backoffLimit'] == 0
+    assert 'activeDeadlineSeconds' not in a['spec']
+    assert a['spec']['ttlSecondsAfterFinished'] == 7200
 
 
 def test_mock_and_namespace_validation():

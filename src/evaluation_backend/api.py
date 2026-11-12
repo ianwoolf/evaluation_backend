@@ -23,7 +23,10 @@ def create_app() -> FastAPI:
         event('service.started')
         async def cleanup():
             from evaluation_backend.upload_api import reconcile_uploads
+            from evaluation_backend.serial_runs import reconcile_serial_runs
             while True:
+                try: await asyncio.to_thread(reconcile_serial_runs)
+                except Exception as error: event('evaluation.queue.reconcile_failed', level='ERROR', error=error)
                 try: await asyncio.to_thread(reconcile_uploads)
                 except Exception as error: event('upload.reconcile.failed', level='ERROR', error=error)
                 await asyncio.sleep(15)
@@ -42,7 +45,7 @@ def create_app() -> FastAPI:
     origins = [v.strip() for v in os.getenv('EVAL_UI_ORIGINS', '').split(',') if v.strip()]
     if origins:
         from fastapi.middleware.cors import CORSMiddleware
-        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=['GET', 'POST', 'PATCH'],
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
                            allow_headers=['Content-Type', 'Authorization', 'X-Project-ID', 'X-Upload-Filename',
                                           'Idempotency-Key', 'X-Request-ID', 'traceparent'])
     instrument_app(app)
@@ -55,6 +58,8 @@ def create_app() -> FastAPI:
     app.include_router(capabilities_router)
     from evaluation_backend.runs import router as runs_router
     app.include_router(runs_router)
+    from evaluation_backend.cleanup_admin import router as cleanup_router
+    app.include_router(cleanup_router)
     from evaluation_backend.storage.api import router as storage_router
     from evaluation_backend.storage import StorageError, NotFound, Conflict
     from fastapi.responses import JSONResponse

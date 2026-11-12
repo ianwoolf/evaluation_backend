@@ -22,9 +22,9 @@ def snapshot_scorers(service, project, ids, metadata):
     return result
 
 
-def aspect_results(service, project, ident):
-    try: context = service.storage.get('run-contexts', project, ident)
-    except NotFound: return {'bindings': [], 'aspects': []}
+def aspect_results(context, samples):
+    if context is None:
+        return {'bindings': [], 'aspects': []}
     selections = context.get('scoring_selections') or context.get('datasets') or []
     bindings = [{**b, 'dataset_id': d['dataset_id'], 'dataset_version': d['dataset_version']}
                 for d in selections for b in d.get('scorer_bindings', [])]
@@ -37,29 +37,24 @@ def aspect_results(service, project, ident):
         for aspect in {b['aspect'] for b in d.get('scorer_bindings', [])}:
             group(aspect, mode)['expected'] += d.get('sample_count', 0)
             dataset_groups[(d['dataset_id'],aspect,mode)] = dict(dataset_id=d['dataset_id'],aspect=aspect,source=mode,evaluated=0,passed=0,errors=0,missing=0)
-    offset = 0
-    while True:
-        page = service.storage.search('samples', project, filters={'evaluation_id': ident}, offset=offset, limit=100)
-        for sample in page['items']:
-            selected = [b for b in bindings if b['dataset_id'] == sample.get('dataset_id', context.get('dataset_id'))]
-            scores = {s['scorerId']: s for s in sample.get('scores', [])}
-            aspects = {}
-            for b in selected: aspects.setdefault(b['aspect'], []).append(b['id'])
-            if not selected and scores: aspects['unclassified'] = list(scores)
-            for aspect, ids in aspects.items():
-                values = [scores.get(i) for i in ids]
-                sources = {s.get('source', mode) for s in values if s}
-                source = next(iter(sources)) if len(sources) == 1 else 'mixed' if sources else mode
-                g = group(aspect, source); g['evaluated'] += 1
-                missing = any(s is None for s in values)
-                error = sample['status'] == 'ERROR' or any(s and s.get('status') == 'error' for s in values)
-                g['missing'] += int(missing); g['errors'] += int(error)
-                g['passed'] += int(not missing and not error and all(s['passed'] for s in values))
-                dg=dataset_groups.setdefault((sample.get('dataset_id',context.get('dataset_id')),aspect,source),dict(dataset_id=sample.get('dataset_id',context.get('dataset_id')),aspect=aspect,source=source,evaluated=0,passed=0,errors=0,missing=0))
-                dg['evaluated']+=1; dg['missing']+=int(missing); dg['errors']+=int(error)
-                dg['passed']+=int(not missing and not error and all(s['passed'] for s in values))
-        offset += len(page['items'])
-        if not page['items'] or offset >= page['total']: break
+    for sample in samples:
+        selected = [b for b in bindings if b['dataset_id'] == sample.get('dataset_id', context.get('dataset_id'))]
+        scores = {s['scorerId']: s for s in sample.get('scores', [])}
+        aspects = {}
+        for b in selected: aspects.setdefault(b['aspect'], []).append(b['id'])
+        if not selected and scores: aspects['unclassified'] = list(scores)
+        for aspect, ids in aspects.items():
+            values = [scores.get(i) for i in ids]
+            sources = {s.get('source', mode) for s in values if s}
+            source = next(iter(sources)) if len(sources) == 1 else 'mixed' if sources else mode
+            g = group(aspect, source); g['evaluated'] += 1
+            missing = any(s is None for s in values)
+            error = sample['status'] == 'ERROR' or any(s and s.get('status') == 'error' for s in values)
+            g['missing'] += int(missing); g['errors'] += int(error)
+            g['passed'] += int(not missing and not error and all(s['passed'] for s in values))
+            dg=dataset_groups.setdefault((sample.get('dataset_id',context.get('dataset_id')),aspect,source),dict(dataset_id=sample.get('dataset_id',context.get('dataset_id')),aspect=aspect,source=source,evaluated=0,passed=0,errors=0,missing=0))
+            dg['evaluated']+=1; dg['missing']+=int(missing); dg['errors']+=int(error)
+            dg['passed']+=int(not missing and not error and all(s['passed'] for s in values))
     totals = {}
     for g in groups.values(): totals[g['aspect']] = totals.get(g['aspect'],0)+g['evaluated']
     return {'dataset_aspects': [{**g,'pass_rate':g['passed']/g['evaluated'] if g['evaluated'] else None} for g in dataset_groups.values()], 'bindings': bindings, 'aspects': [{**g, 'pending': max(0,g['expected']-totals[g['aspect']]),

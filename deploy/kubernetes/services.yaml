@@ -120,7 +120,7 @@ spec:
         ports:
         - containerPort: 8001
         env:
-        - name: EVAL_MOCK_GUARDRAIL_TOKEN
+        - name: EVAL_GUARDRAIL_TOKEN
           valueFrom:
             secretKeyRef:
               name: evaluation-mock-guardrail
@@ -210,8 +210,16 @@ rules:
   - jobs
   verbs:
   - create
+  - delete
   - get
   - list
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - delete
 - apiGroups:
   - ''
   resources:

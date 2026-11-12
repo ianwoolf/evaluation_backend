@@ -6,8 +6,9 @@ from evaluation_backend.mock_guardrail import app
 
 
 def test_scan_and_scorer(monkeypatch):
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0')
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN', 'local-test-token')
+    draws = iter([0.75, 0.75, 0.25, 0.25])
+    monkeypatch.setattr('evaluation_backend.mock_guardrail.random.random', lambda: next(draws))
+    monkeypatch.setenv('EVAL_GUARDRAIL_TOKEN', 'local-test-token')
     c=TestClient(app); path='/runtime/v1/endpoints/mock-guardrail/backend/v1/scans'
     assert c.post(path,json={'input':'hi'}).status_code==401
     h={'Authorization':'Bearer local-test-token'}
@@ -17,14 +18,12 @@ def test_scan_and_scorer(monkeypatch):
         r=c.post(path,headers=h,json={'input':text,'verbose':True});assert r.status_code==200
         assert module.score({'label':label,'output':r.json()})['outcome']==expected
         assert len(r.json()['result']['scannerResults'])==1
-    assert c.post(path,headers=h,json={'input':'[mock:timeout]'}).status_code==504
-    assert c.post(path,headers=h,json={'input':'[mock:error]'}).status_code==503
     with pytest.raises(ValueError):module.score({'label':'safe','output':{'result':{'outcome':'unknown'}}})
 
 def test_structured_request_logs_and_health_filter(monkeypatch,capsys):
     import json
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0')
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN','DO_NOT_LOG_TOKEN')
+    monkeypatch.setattr('evaluation_backend.mock_guardrail.random.random', lambda: 0.25)
+    monkeypatch.setenv('EVAL_GUARDRAIL_TOKEN','DO_NOT_LOG_TOKEN')
     client=TestClient(app)
     for path in ('/health','/ready','/health?probe=1'):
         assert client.get(path).status_code==200
@@ -38,7 +37,7 @@ def test_structured_request_logs_and_health_filter(monkeypatch,capsys):
     assert rows[1]['outcome']=='flagged' and rows[1]['trace_id']=='a'*32
     assert rows[1]['status_code']==200 and rows[1]['duration_ms']>=0
     assert 'DO_NOT_LOG_TOKEN' not in raw and 'PRIVATE_INPUT' not in raw
-    for payload,auth,status in [({'input':'hi'},False,401),({'input':'[mock:timeout]'},True,504),({'input':'[mock:error]'},True,503),({},True,422)]:
+    for payload,auth,status in [({'input':'hi'},False,401),({},True,422)]:
         r=client.post(path,headers=headers if auth else {},json=payload)
         assert r.status_code==status
         rows=[json.loads(line) for line in capsys.readouterr().out.splitlines()]
@@ -46,24 +45,12 @@ def test_structured_request_logs_and_health_filter(monkeypatch,capsys):
         assert rows[0]['request_id']==rows[-1]['request_id']==r.headers['X-Request-ID']
 
 
-@pytest.mark.parametrize('draw,flipped,expected',[(.05,True,'blocked'),(.5,False,'cleared')])
-def test_random_flip_probability(monkeypatch,capsys,draw,flipped,expected):
-    import json
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN','test-token')
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0.1')
+@pytest.mark.parametrize('draw,expected',[(0.499,'blocked'),(0.5,'cleared')])
+def test_random_outcome_is_independent_of_input(monkeypatch,draw,expected):
+    monkeypatch.setenv('EVAL_GUARDRAIL_TOKEN','test-token')
     monkeypatch.setattr('evaluation_backend.mock_guardrail.random.random',lambda:draw)
     c=TestClient(app);path='/runtime/v1/endpoints/mock-guardrail/backend/v1/scans';h={'Authorization':'Bearer test-token'}
-    r=c.post(path,headers=h,json={'input':'benign','flagOnly':False})
-    assert r.json()['result']['outcome']==expected
-    assert r.headers['X-Evaluation-Mock-Flipped']==str(flipped).lower()
-    logs=[json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert logs[-1]['flipped']==flipped and logs[-1]['baseline_outcome']=='cleared'
-    r=c.post(path,headers=h,json={'input':'[mock:unsafe]','flagOnly':False})
-    assert r.json()['result']['outcome']==('cleared' if flipped else 'blocked')
-
-@pytest.mark.parametrize('value',['nan','-1','1.1','invalid'])
-def test_invalid_flip_rate(monkeypatch,value):
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_TOKEN','test-token')
-    monkeypatch.setenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE',value)
-    r=TestClient(app).post('/runtime/v1/endpoints/mock-guardrail/backend/v1/scans',headers={'Authorization':'Bearer test-token'},json={'input':'hello'})
-    assert r.status_code==503
+    for text in ('benign', '[mock:unsafe]', '[mock:timeout]', '[mock:error]'):
+        result=c.post(path,headers=h,json={'input':text,'flagOnly':False})
+        assert result.status_code==200
+        assert result.json()['result']['outcome']==expected

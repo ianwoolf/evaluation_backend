@@ -1,7 +1,6 @@
 """Explicit mock Scan endpoint for local integration; never reads dataset labels."""
 import hmac
 import random
-import math
 import os
 import json
 import re
@@ -52,9 +51,13 @@ def health():
     return {'status': 'ok', 'source': 'mock'}
 
 
+def shared_token():
+    return os.getenv('EVAL_GUARDRAIL_TOKEN') or os.getenv('EVAL_MOCK_GUARDRAIL_TOKEN', '')
+
+
 @app.get('/ready')
 def ready():
-    if not os.getenv('EVAL_MOCK_GUARDRAIL_TOKEN'):
+    if not shared_token():
         raise HTTPException(503, 'Mock credential is not configured')
     return {'status': 'ready', 'source': 'mock'}
 
@@ -70,7 +73,7 @@ class Scan(BaseModel):
 @app.post('/runtime/v1/endpoints/{endpoint_id}/backend/v1/scans')
 def scan(endpoint_id: str, body: Scan, response: Response, request: Request, authorization: str = Header(default='')):
     request.state.scan_log={'endpoint_id':endpoint_id,'input_chars':len(body.input),'scan_direction':body.scanDirection,'flag_only':body.flagOnly}
-    token = os.getenv('EVAL_MOCK_GUARDRAIL_TOKEN', '')
+    token = shared_token()
     if not token:
         raise HTTPException(503, 'Mock credential is not configured')
     if endpoint_id != os.getenv('EVAL_MOCK_GUARDRAIL_ID', 'mock-guardrail') or not hmac.compare_digest(authorization, 'Bearer '+token):
@@ -79,19 +82,7 @@ def scan(endpoint_id: str, body: Scan, response: Response, request: Request, aut
     response.headers['X-Request-ID'] = ident
     response.headers['X-TaskLattice-Scan-Compatibility'] = 'v1'
     response.headers['X-Evaluation-Source'] = 'mock'
-    # Deliberate fixture markers provide repeatable cases independently of labels.
-    if '[mock:timeout]' in body.input:
-        raise HTTPException(504, {'code': 'guardrail_timeout', 'message': 'Mock timeout', 'requestId': ident})
-    if '[mock:error]' in body.input:
-        raise HTTPException(503, {'code': 'guardrail_execution_failed', 'message': 'Mock failure', 'requestId': ident})
-    baseline_hit = '[mock:unsafe]' in body.input
-    try: flip_rate=float(os.getenv('EVAL_MOCK_GUARDRAIL_FLIP_RATE','0.1'))
-    except ValueError: raise HTTPException(503,'Invalid mock flip rate') from None
-    if not math.isfinite(flip_rate) or not 0<=flip_rate<=1:raise HTTPException(503,'Invalid mock flip rate')
-    flipped=random.random()<flip_rate
-    hit=not baseline_hit if flipped else baseline_hit
-    request.state.scan_log.update(baseline_outcome=('flagged' if body.flagOnly else 'blocked') if baseline_hit else 'cleared',flipped=flipped,flip_rate=flip_rate)
-    response.headers['X-Evaluation-Mock-Flipped']='true' if flipped else 'false'
+    hit = random.random() < 0.5
     outcome = ('flagged' if body.flagOnly else 'blocked') if hit else 'cleared'
     request.state.scan_log['outcome']=outcome
     now = datetime.now(timezone.utc).isoformat()

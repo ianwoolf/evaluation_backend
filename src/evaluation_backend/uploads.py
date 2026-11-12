@@ -31,28 +31,71 @@ def parse_upload(data, filename, schema):
             rows = csv.reader(io.StringIO(data.decode('utf-8-sig')), strict=True)
             return _parse_rows(rows, schema)
         if suffix != '.xlsx': raise UploadError('Only .csv and .xlsx files are supported')
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            entries = archive.infolist()
-            if len(entries) > 2000 or sum(e.file_size for e in entries) > 40_000_000:
-                raise UploadError('Excel expanded size exceeds limit')
-            if any('vbaproject' in e.filename.lower() or 'externallinks/' in e.filename.lower() for e in entries):
-                raise UploadError('Macros and external links are not supported')
-        import openpyxl
-        book = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=False, keep_links=False)
-        try:
-            if len(book.worksheets) != 1: raise UploadError('Excel must contain exactly one worksheet')
-            sheet = book.worksheets[0]
-            if sheet.max_row and sheet.max_row > MAX_ROWS + 1: raise UploadError('Too many rows')
-            if sheet.max_column and sheet.max_column > len(schema['fields']): raise UploadError('Unknown columns')
-            def cells():
-                for row in sheet.iter_rows():
-                    if any(c.data_type == 'f' for c in row): raise UploadError('Excel formulas are not supported')
-                    yield [c.value for c in row]
-            return _parse_rows(cells(), schema)
-        finally: book.close()
+        with xlsx_rows(data, max_rows=MAX_ROWS, max_columns=len(schema['fields'])) as rows:
+            return _parse_rows(rows, schema)
     except UploadError: raise
     except Exception:
         raise UploadError('Unable to parse file; use UTF-8 CSV or a valid XLSX workbook') from None
+
+
+@contextmanager
+def xlsx_rows(data, *, max_rows, max_columns):
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        entries = archive.infolist()
+        if len(entries) > 2000 or sum(e.file_size for e in entries) > 40_000_000:
+            raise UploadError('Excel expanded size exceeds limit')
+        if any('vbaproject' in e.filename.lower() or 'externallinks/' in e.filename.lower() for e in entries):
+            raise UploadError('Macros and external links are not supported')
+    import openpyxl
+    book = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=False, keep_links=False)
+    try:
+        if len(book.worksheets) != 1:
+            raise UploadError('Excel must contain exactly one worksheet')
+        sheet = book.worksheets[0]
+        if sheet.max_row and sheet.max_row > max_rows + 1:
+            raise UploadError(f'Too many rows (maximum {max_rows:,})')
+        if sheet.max_column and sheet.max_column > max_columns:
+            raise UploadError('Too many columns')
+
+        def cells():
+            for number, row in enumerate(sheet.iter_rows(), 1):
+                if number > max_rows + 1:
+                    raise UploadError(f'Too many rows (maximum {max_rows:,})')
+                if len(row) > max_columns:
+                    raise UploadError('Too many columns')
+                if any(c.data_type == 'f' for c in row):
+                    raise UploadError('Excel formulas are not supported')
+                yield [c.value for c in row]
+
+        yield cells()
+    finally:
+        book.close()
+
+
+def parse_dataset_xlsx(data):
+    try:
+        with xlsx_rows(data, max_rows=1000, max_columns=256) as rows:
+            header = next(rows, [])
+            while header and header[-1] is None:
+                header.pop()
+            if not header or any(not isinstance(value, str) or not value.strip() for value in header):
+                raise UploadError('Excel headers must be nonempty text')
+            columns = [value.strip() for value in header]
+            if len(set(columns)) != len(columns):
+                raise UploadError('Excel headers must be unique')
+            records = []
+            for number, row in enumerate(rows, 2):
+                if any(value is not None for value in row[len(columns):]):
+                    raise UploadError(f'Excel row {number} contains data without a column header')
+                if any(value is not None and value != '' for value in row):
+                    records.append(dict(zip(columns, row)))
+            if not records:
+                raise UploadError('Import must contain at least one record')
+            return records
+    except UploadError:
+        raise
+    except Exception:
+        raise UploadError('Unable to parse file; use a valid XLSX workbook') from None
 
 
 def _parse_rows(rows, schema):
@@ -88,6 +131,8 @@ def _parse_rows(rows, schema):
                     if type(raw) is bool: raise ValueError()
                     value = float(raw)
                     if not math.isfinite(value): raise ValueError()
+                    if schema.get('evaluation_type') == 'guardrail' and name == 'label' and value.is_integer():
+                        value = int(value)
                 elif kind == 'json':
                     value = json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
                 else: raise ValueError()
@@ -107,6 +152,10 @@ class UploadStore:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.connect() as db:
             db.execute('CREATE TABLE IF NOT EXISTS uploads (id TEXT PRIMARY KEY, project TEXT, dataset TEXT, version INTEGER, count INTEGER, expires REAL, job TEXT, experiment TEXT, deleted INTEGER DEFAULT 0)')
+            db.execute('''CREATE TABLE IF NOT EXISTS upload_group_claims (
+                upload_id TEXT NOT NULL, group_id TEXT NOT NULL, experiment TEXT NOT NULL,
+                PRIMARY KEY (upload_id, experiment)
+            )''')
         os.chmod(self.root / 'metadata.sqlite', 0o600)
 
     @contextmanager
@@ -140,30 +189,60 @@ class UploadStore:
 
     @observed('upload.claim', project_id='project', upload_id='ident', run_id='experiment')
     def claim(self, project, ident, dataset, version, job, experiment):
+        return self.claim_many(project, [(ident, dataset, version)], job, experiment)[ident]
+
+    @observed('upload.claim_many', project_id='project', run_id='experiment')
+    def claim_many(self, project, uploads, job, experiment, *, max_rows=MAX_ROWS, validate=None, group_id=None):
+        counts = {}
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = self._row(db,project,ident)
-            if (row['dataset'], row['version']) != (dataset,version): raise UploadError('Upload schema version mismatch')
-            if row['job'] and (row['job'],row['experiment']) != (job,experiment): raise UploadError('Upload already bound to another run')
-            db.execute('UPDATE uploads SET job=?, experiment=?, expires=? WHERE id=?', (job,experiment,time.time()+86400,ident))
-            return row['count']
+            for ident, dataset, version in uploads:
+                row = self._row(db, project, ident)
+                if (row['dataset'], row['version']) != (dataset, version): raise UploadError('Upload schema version mismatch')
+                if row['job'] and (group_id is not None or (row['job'], row['experiment']) != (job, experiment)):
+                    raise UploadError('Upload already bound to another run')
+                group = db.execute('SELECT group_id FROM upload_group_claims WHERE upload_id=? LIMIT 1', (ident,)).fetchone()
+                if group and group['group_id'] != group_id:
+                    raise UploadError('Upload already bound to another comparison group')
+                if validate:
+                    validate(dataset, self._content(ident))
+                counts[ident] = row['count']
+            if sum(counts.values()) > max_rows:
+                raise UploadError('An evaluation requires 1 to 10,000 samples across all datasets')
+            expires = time.time() + 86400
+            if group_id is not None:
+                # Retain shared rows until expiry even if the first Job finishes before the next is submitted.
+                db.executemany('INSERT OR IGNORE INTO upload_group_claims (upload_id, group_id, experiment) VALUES (?,?,?)',
+                               [(ident, group_id, experiment) for ident in counts])
+                db.executemany('UPDATE uploads SET expires=? WHERE id=?', [(expires, ident) for ident in counts])
+            else:
+                db.executemany('UPDATE uploads SET job=?, experiment=?, expires=? WHERE id=?',
+                               [(job, experiment, expires, ident) for ident in counts])
+        return counts
+
+    def _content(self, ident):
+        try: return json.loads((self.root / (ident + '.json')).read_text())
+        except FileNotFoundError: raise UploadError('Upload content has been deleted') from None
 
     @observed('upload.read', project_id='project', upload_id='ident', run_id='experiment')
     def read(self, project, ident, experiment):
         with self.connect() as db:
             row = self._row(db,project,ident)
-            if row['experiment'] != experiment: raise UploadError('Upload is not bound to this run')
-            try: return json.loads((self.root / (row['id'] + '.json')).read_text())
-            except FileNotFoundError: raise UploadError('Upload content has been deleted') from None
+            if row['experiment'] != experiment and not db.execute(
+                'SELECT 1 FROM upload_group_claims WHERE upload_id=? AND experiment=?', (ident, experiment)
+            ).fetchone():
+                raise UploadError('Upload is not bound to this run')
+            return self._content(row['id'])
 
     @observed('upload.delete', project_id='project', upload_id='ident')
-    def delete(self, project, ident):
+    def delete(self, project, ident, *, observed_expiry=None):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM uploads WHERE id=? AND project=?',(ident,project)).fetchone()
-            if row:
+            if row and (observed_expiry is None or row['expires'] == observed_expiry):
                 (self.root / (row['id']+'.json')).unlink(missing_ok=True)
                 db.execute('UPDATE uploads SET deleted=1 WHERE id=?',(ident,))
+                db.execute('DELETE FROM upload_group_claims WHERE upload_id=?', (ident,))
 
     def reconcile(self, terminal):
         with self.connect() as db: rows=db.execute('SELECT * FROM uploads WHERE deleted=0').fetchall()
@@ -171,7 +250,7 @@ class UploadStore:
             state = terminal(row['job']) if row['job'] else False
             orphan = row['job'] and state is None and time.time() > row['expires'] - 86400 + 60
             if row['expires'] <= time.time() or state is True or orphan:
-                self.delete(row['project'],row['id'])
+                self.delete(row['project'],row['id'],observed_expiry=row['expires'])
         # Crash between file creation and metadata commit: remove old orphan files.
         with self.connect() as db: known={r[0] for r in db.execute('SELECT id FROM uploads')}
         for path in self.root.glob('upload-*.json'):

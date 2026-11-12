@@ -11,6 +11,23 @@ from test_runs import Cluster
 
 from memory_storage import Memory
 
+
+def test_dataset_excel_preview_returns_columns_for_mapping(live):
+    from io import BytesIO
+    from openpyxl import Workbook
+
+    client, _, _, headers, _ = live
+    workbook = Workbook()
+    workbook.active.append(['Prompt', 'Unsafe', 'Score'])
+    workbook.active.append(['hello', False, 3])
+    stream = BytesIO()
+    workbook.save(stream)
+    url = '/api/v1/evaluations/datasets/actions/parse-xlsx'
+    response = client.post(url, content=stream.getvalue(), headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json() == {'rows': [{'Prompt': 'hello', 'Unsafe': False, 'Score': 3}]}
+    assert client.post(url, content=b'not a workbook', headers=headers).status_code == 422
+
 @pytest.fixture
 def live(monkeypatch,tmp_path):
     monkeypatch.setenv('EVAL_TRIGGER_TOKEN','secret')

@@ -1,4 +1,4 @@
-"""Short-lived, project/run-bound worker capability. No global trigger secret in Jobs."""
+"""Project/run-bound worker capability. No global trigger secret in Jobs."""
 import base64
 import hashlib
 import hmac
@@ -8,8 +8,9 @@ import time
 from fastapi import HTTPException
 
 
-def issue_worker_token(project, evaluation):
-    value=base64.urlsafe_b64encode(json.dumps({'project':project,'evaluation':evaluation,'expires':int(time.time())+3600},sort_keys=True).encode()).decode().rstrip('=')
+def issue_worker_token(project, evaluation, ttl=3600):
+    expires = None if ttl is None else int(time.time()) + ttl
+    value=base64.urlsafe_b64encode(json.dumps({'project':project,'evaluation':evaluation,'expires':expires},sort_keys=True).encode()).decode().rstrip('=')
     sig=hmac.new(os.environ['EVAL_TRIGGER_TOKEN'].encode(),value.encode(),hashlib.sha256).hexdigest()
     return value+'.'+sig
 
@@ -20,7 +21,7 @@ def verify_worker_token(token):
         expected=hmac.new(os.environ['EVAL_TRIGGER_TOKEN'].encode(),value.encode(),hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected,sig):raise ValueError()
         claims=json.loads(base64.urlsafe_b64decode(value+'='*(-len(value)%4)))
-        if claims['expires']<=time.time():raise ValueError()
+        if claims['expires'] is not None and claims['expires']<=time.time():raise ValueError()
         return claims
     except Exception:raise HTTPException(401,'Unauthorized') from None
 

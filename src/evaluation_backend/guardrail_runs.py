@@ -4,16 +4,28 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from evaluation_backend.runs import StartRun, DatasetSelection, start, authorize, kube
 from evaluation_backend.run_auth import verify_worker_token
-from evaluation_backend.storage.service import get_service, DatasetContent
+from evaluation_backend.storage.service import get_service, DatasetContent, DatasetField
 
 router = APIRouter(prefix='/api/v1/evaluations')
+
+
+def validate_uploaded_rows(content, binding):
+    from evaluation_backend.guardrail_contracts import GuardrailDatasetConfig, validate_guardrail_rows
+    from evaluation_backend.uploads import UploadError
+    config = GuardrailDatasetConfig.model_validate({k: binding[k] for k in GuardrailDatasetConfig.model_fields})
+    fields = [DatasetField.model_validate(field) for field in content['fields']]
+    for index, row in enumerate(content['rows'], 1):
+        try:
+            validate_guardrail_rows(fields, [row], config)
+        except ValueError as error:
+            raise UploadError(f'Sample {index}: {error}') from None
 
 
 def resolve_bindings(service, project, target, environment, selections, versions, configured=None, validate_connection=True):
     if target.get('kind') != 'GUARDRAIL':
         raise HTTPException(422, 'Direct Guardrail evaluation requires a GUARDRAIL target')
     from evaluation_backend.guardrail_registry import resolve
-    if validate_connection: resolve(target)
+    if validate_connection: resolve(target, service, project)
     if environment['modelId'] != 'none':
         raise HTTPException(422, 'Direct Guardrail evaluation requires Model: None')
     commit = os.getenv('EVAL_GUARDRAIL_SCORER_COMMIT', '')
@@ -72,8 +84,6 @@ class GuardrailRun(BaseModel):
 @router.post('/guardrail-runs', dependencies=[Depends(authorize)])
 def trigger(value: GuardrailRun, x_project_id: str = Header(min_length=1),
             idempotency_key: str = Header(min_length=16,max_length=128), cluster=Depends(kube),service=Depends(get_service)):
-    if any(d.upload_id for d in value.datasets):
-        raise HTTPException(422, 'Guardrail runs currently require published datasets')
     from evaluation_backend.target_configs import load_config, TriggerTarget, trigger as configured_trigger
     config = load_config(service, x_project_id, value.target_id)
     if config.get('execution_mode') != 'guardrail' or (config['environment_id'], config['environment_version']) != (value.environment_id, value.environment_version):
@@ -93,9 +103,9 @@ def detail(evaluation: str, authorization: str = Header(default=''),x_project_id
     connection=context.get('guardrail_connection')
     if connection is None:
         from evaluation_backend.guardrail_registry import resolve
-        connection=resolve(context['target'])
+        connection=resolve(context['target'], service, x_project_id)
     from evaluation_backend.guardrail_registry import credential
-    token=credential(connection)
+    token=credential()
     return {'endpoint':connection['address'],'token':token,'verify_ssl':connection.get('verify_ssl', True),'source':'configured'}
 
 

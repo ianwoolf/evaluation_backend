@@ -8,7 +8,7 @@ root=Path(__file__).resolve().parent
 directory=root/'.secrets'
 directory.mkdir(mode=0o700,exist_ok=True)
 os.chmod(directory,0o700)
-values={'guardrail_token':os.getenv('EVAL_MOCK_GUARDRAIL_TOKEN',''),
+values={'guardrail_token':os.getenv('EVAL_GUARDRAIL_TOKEN',''),
         'trigger_token':os.getenv('EVAL_TRIGGER_TOKEN') or secrets.token_urlsafe(32),
         'resolver_token':os.getenv('EVAL_MODEL_RESOLVER_TOKEN') or secrets.token_urlsafe(32),
         'es_password':os.getenv('EVAL_ES_PASSWORD') or secrets.token_urlsafe(32),

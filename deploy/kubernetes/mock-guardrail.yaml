@@ -5,7 +5,6 @@ metadata:
   namespace: evaluation
 data:
   EVAL_MOCK_GUARDRAIL_ID: mock-guardrail
-  EVAL_MOCK_GUARDRAIL_FLIP_RATE: "0.1"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -28,14 +27,14 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
       - name: mock-guardrail
-        image: evaluation-mock-guardrail:random-20261104
+        image: evaluation-mock-guardrail:random-only-20261111
         imagePullPolicy: IfNotPresent
         ports:
         - {containerPort: 8002, name: http}
         envFrom:
         - configMapRef: {name: evaluation-mock-guardrail}
         env:
-        - name: EVAL_MOCK_GUARDRAIL_TOKEN
+        - name: EVAL_GUARDRAIL_TOKEN
           valueFrom:
             secretKeyRef: {name: evaluation-mock-guardrail, key: token}
         securityContext:

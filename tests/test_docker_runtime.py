@@ -15,7 +15,8 @@ def workload():
     return job
 
 
-def test_docker_create_limits_secrets_and_no_kubernetes(monkeypatch):
+@pytest.mark.parametrize('queued', [False, True])
+def test_docker_create_limits_secrets_and_no_kubernetes(monkeypatch, queued):
     monkeypatch.setenv('EVAL_DOCKER_NETWORK','test-network')
     monkeypatch.setenv('EVAL_TRIGGER_TOKEN','never-in-worker')
     monkeypatch.setenv('EVAL_MODEL_TOKEN_ABCDEF123456','never-provider-token')
@@ -23,19 +24,38 @@ def test_docker_create_limits_secrets_and_no_kubernetes(monkeypatch):
     monkeypatch.setenv('EVAL_MODEL_RESOLVER_TOKEN','file-backed-value')
     monkeypatch.setenv('HOSTNAME','api-container')
     saved={}
+    names=[]
+    starts=[]
     def handle(request):
         path=request.url.path
         assert path.startswith('/v1.45/')
         if path.endswith('/api-container/json'):
             return httpx.Response(200,json={'Mounts':[{'Destination':'/run/secrets/resolver_token','Source':'/host/private/resolver_token'}]})
         if path.endswith('/containers/create'):
+            names.append(request.url.params['name'])
             saved.update(json.loads(request.content));return httpx.Response(201,json={'Id':'worker'})
-        if path.endswith('/worker/start'):return httpx.Response(204)
-        if path.endswith('/worker/json'):
-            return httpx.Response(200,json={'Id':'worker','Created':'2026-01-01T00:00:00Z','Config':{'Labels':saved['Labels']},'State':{'Running':True}})
+        if path.endswith('/worker/start'):
+            starts.append(True)
+            return httpx.Response(204)
+        if path.endswith('/worker/json') or any(path.endswith('/'+name+'/json') for name in names):
+            return httpx.Response(200,json={'Id':'worker','Created':'2026-01-01T00:00:00Z','Config':{'Labels':saved['Labels']},
+                'State':{'Running':bool(starts),'Status':'running' if starts else 'created'}})
         raise AssertionError(path)
     client=httpx.Client(base_url='http://docker/v1.45',transport=httpx.MockTransport(handle))
-    result=DockerRuntime(client).create(workload())
+    runtime=DockerRuntime(client)
+    job=workload()
+    if queued:
+        from evaluation_backend.runs import WAIT_FOR
+        job['spec']['suspend']=True
+        job['metadata']['annotations'][WAIT_FOR]='[]'
+    result=runtime.create(job)
+    if queued:
+        assert not starts and result['spec']['suspend']
+        path=runtime.jobs+'/'+job['metadata']['name']
+        runtime.call('PATCH',path,json={'spec':{'suspend':False}})
+        result=runtime.call('GET',path)
+        assert WAIT_FOR not in result['metadata']['annotations']
+    assert starts==[True]
     env=dict(item.split('=',1) for item in saved['Env'])
     assert 'EVAL_TRIGGER_TOKEN' not in env and 'EVAL_MODEL_TOKEN_ABCDEF123456' not in env
     assert 'EVAL_MODEL_RESOLVER_TOKEN' not in env
@@ -50,22 +70,20 @@ def test_docker_create_limits_secrets_and_no_kubernetes(monkeypatch):
     assert result['status']['active']==1
 
 
-def test_docker_deadline_and_log_frames():
-    stopped=[];record=workload()
+def test_docker_leaves_long_running_jobs_active_and_reads_log_frames():
+    record=workload()
     record={'metadata':record['metadata'],'spec':{'activeDeadlineSeconds':1}}
     container={'Id':'worker','Created':'2026-01-01T00:00:00Z','Config':{'Labels':{OWNER:'evaluation-backend',NETWORK:'evaluation-compose',RECORD:json.dumps(record)}},
                'State':{'Running':True,'StartedAt':(datetime.now(timezone.utc)-timedelta(seconds=10)).isoformat()}}
     def handle(request):
-        if request.url.path.endswith('/stop'):
-            stopped.append(True);container['State']={'Running':False,'Status':'exited','ExitCode':137};return httpx.Response(204)
         if request.url.path.endswith('/json'):return httpx.Response(200,json=container)
         if request.url.path.endswith('/logs'):
             payload=b'{"evaluation_id":"exp-test","items":2}\n'
             return httpx.Response(200,content=b'\x01\x00\x00\x00'+struct.pack('>I',len(payload))+payload)
         raise AssertionError(str(request.url))
     runtime=DockerRuntime(httpx.Client(base_url='http://docker/v1.45',transport=httpx.MockTransport(handle)))
-    assert runtime.job(container)['status']['conditions'][0]['type']=='Failed'
-    assert stopped and json.loads(runtime.logs('worker',100))['items']==2
+    assert runtime.job(container)['status']['active']==1
+    assert json.loads(runtime.logs('worker',100))['items']==2
 
 
 def test_docker_does_not_inspect_unowned_containers():

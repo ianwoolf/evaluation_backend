@@ -1,8 +1,9 @@
 """Guardrail-specific contracts; generic datasets retain their existing schema."""
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Label = Literal['safe', 'unsafe']
+ProviderId = Annotated[str, Field(pattern=r'^(nemo guardrail|[A-Za-z0-9][A-Za-z0-9_.-]{0,127})$')]
 
 
 class StrictContract(BaseModel):
