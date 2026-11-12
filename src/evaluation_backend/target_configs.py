@@ -4,7 +4,7 @@ from evaluation_backend.observability import observed
 from typing import Literal, Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from evaluation_backend.runs import authorize, start_run, run_job_name, StartRun, DatasetSelection, kube
+from evaluation_backend.runs import authorize, start_run, StartRun, DatasetSelection, kube
 from evaluation_backend.environments import environment_version
 from evaluation_backend.targets import get_target, Target
 from evaluation_backend.storage import NotFound, Conflict
@@ -100,7 +100,7 @@ def save_config(ident:str,value:TargetConfig,x_project_id:str=Header(min_length=
 
 
 class TriggerTarget(BaseModel):
-    concurrency: int | None = Field(default=None, ge=1, le=32, strict=True)
+    concurrency: int | None = Field(default=None, ge=1, strict=True)
     concurrency_group: str | None = Field(default=None, pattern=r'^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
     provider: ProviderId | None = None
     guardrail_id: str | None = Field(default=None,min_length=1,max_length=128)
@@ -117,10 +117,17 @@ def trigger(ident:str,value:TriggerTarget,x_project_id:str=Header(min_length=1),
     return trigger_target(ident, value, x_project_id, idempotency_key, service, cluster)
 
 
+class ComparisonEndpoint(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    provider: ProviderId
+    guardrail_id: str = Field(min_length=1, max_length=128)
+
+
 class TriggerComparison(BaseModel):
     model_config = ConfigDict(extra='forbid')
     group_id: str = Field(pattern=r'^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
-    levels: list[Annotated[int, Field(strict=True, ge=1, le=32)]] = Field(min_length=2, max_length=8)
+    levels: list[Annotated[int, Field(strict=True, ge=1)]] = Field(min_length=2, max_length=8)
+    endpoints: list[ComparisonEndpoint] | None = Field(default=None, min_length=2, max_length=8)
     config_revision: str = Field(min_length=1, max_length=128)
     provider: ProviderId | None = None
     guardrail_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -131,24 +138,37 @@ class TriggerComparison(BaseModel):
 def trigger_comparison(ident: str, value: TriggerComparison, x_project_id: str = Header(min_length=1),
                        service=Depends(get_service), cluster=Depends(kube)):
     if len(set(value.levels)) != len(value.levels):
-        raise HTTPException(422, 'Choose 2–8 distinct concurrency levels from 1 to 32')
+        raise HTTPException(422, 'Choose 2–8 distinct positive concurrency levels')
     config = load_config(service, x_project_id, ident)
-    shared = value.model_dump(exclude={'group_id', 'levels'})
-    runs, predecessors = [], []
+    if config['_revision'] != value.config_revision:
+        raise Conflict('Target config changed; reload before triggering')
+    shared = value.model_dump(exclude={'group_id', 'levels', 'endpoints'})
+    connections = None
+    comparison_plan = value.levels
+    if value.endpoints is not None:
+        if (config.get('execution_mode') != 'guardrail' or len(value.endpoints) != len(value.levels)
+                or value.provider is not None or value.guardrail_id is not None):
+            raise HTTPException(422, 'Specify exactly one endpoint per Guardrail comparison run')
+        from evaluation_backend.guardrail_registry import resolve
+        endpoints = [endpoint.model_dump() for endpoint in value.endpoints]
+        connections = [resolve(endpoint, service, x_project_id) for endpoint in endpoints]
+        comparison_plan = [{**endpoint, 'concurrency': level} for level, endpoint in zip(value.levels, endpoints)]
+    runs = []
     connection = None
     for index, level in enumerate(value.levels):
         member_key = f'{value.group_id}:serial:{index}'
-        member = TriggerTarget(**shared, concurrency=level, concurrency_group=value.group_id)
+        options = {**shared, **endpoints[index]} if connections is not None else shared
+        member = TriggerTarget(**options, concurrency=level, concurrency_group=value.group_id)
         runs.append(trigger_target(ident, member, x_project_id, member_key, service, cluster,
-                                   wait_for=predecessors, config=config, serial_levels=value.levels, connection=connection))
-        predecessors.append(run_job_name(x_project_id, member_key))
-        if index == 0 and config.get('execution_mode') == 'guardrail':
+                                   config=config, comparison_plan=comparison_plan, group_index=index,
+                                   connection=connections[index] if connections is not None else connection))
+        if connections is None and index == 0 and config.get('execution_mode') == 'guardrail':
             context = service.storage.get('run-contexts', x_project_id, runs[0]['experiment_id'])
             connection = context['guardrail_connection']
     return {'items': runs}
 
 
-def trigger_target(ident, value, x_project_id, idempotency_key, service, cluster, *, wait_for=None, config=None, serial_levels=None, connection=None):
+def trigger_target(ident, value, x_project_id, idempotency_key, service, cluster, *, config=None, comparison_plan=None, group_index=None, connection=None):
     config=config if config is not None else load_config(service,x_project_id,ident)
     if config['_revision']!=value.config_revision:raise Conflict('Target config changed; reload before triggering')
     selections = value.datasets or [DatasetSelection(**d, upload_id=value.upload_id) for d in configured_datasets(config)]
@@ -168,8 +188,8 @@ def trigger_target(ident, value, x_project_id, idempotency_key, service, cluster
     request=StartRun(concurrency=value.concurrency, concurrency_group=value.concurrency_group, guardrail_provider=value.provider,guardrail_instance_id=value.guardrail_id,execution_mode=config.get("execution_mode","legacy"), config_revision=config["_revision"], guardrail_bindings=config.get("guardrail_bindings"), name=value.name,target_id=ident,dataset_id=selections[0].dataset_id,dataset_version=selections[0].dataset_version,
         environment_id=config['environment_id'],environment_version=config['environment_version'],model_id=config['model_id'],
         scorer_selection=config.get('scorer_selection','shared'),scorer_ids=config['scorer_ids'],scoring_mode=config['scoring_mode'],snapshot={},upload_id=None if per_dataset else value.upload_id,datasets=selections if per_dataset else None)
-    return start_run(request,x_project_id,idempotency_key,cluster,service,wait_for=wait_for,
-                     serial_levels=serial_levels,connection=connection)
+    return start_run(request,x_project_id,idempotency_key,cluster,service,
+                     comparison_plan=comparison_plan,group_index=group_index,connection=connection)
 
 
 def load_config(service, project, ident):

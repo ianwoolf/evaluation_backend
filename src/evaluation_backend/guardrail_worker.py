@@ -101,7 +101,8 @@ def run(client=None):
     import threading
     from evaluation_backend.git_scorers import prepare
     concurrency=int(os.getenv('EVAL_CONCURRENCY','1'))
-    if not 1<=concurrency<=32:raise ValueError('EVAL_CONCURRENCY must be 1..32')
+    if concurrency < 1:
+        raise ValueError('EVAL_CONCURRENCY must be a positive integer')
     tracing.configure()
     client=client or StorageClient()
     ident=os.environ['EXPERIMENT_ID']

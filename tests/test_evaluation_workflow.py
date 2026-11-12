@@ -149,7 +149,7 @@ def test_trigger_concurrency_overrides_share_group_and_keep_environment_default(
  expected_default=config['concurrency']
  group='4bdd471a-a54c-460f-a946-d39d09897360'
  base={'config_revision':config['revision'],'provider':'f5','guardrail_id':'g'}
- for value in (2, 6):
+ for value in (2, 64):
   request={**base,'concurrency':value,'concurrency_group':group}
   headers={**h,'Idempotency-Key':f'concurrency-group-{value}'}
   response=c.post(ROOT+'/targets/g/runs',json=request,headers=headers)
@@ -163,7 +163,7 @@ def test_trigger_concurrency_overrides_share_group_and_keep_environment_default(
   assert c.post(ROOT+'/targets/g/runs',json=request,headers=headers).json()['id']==run['id']
  assert k.created==2
  assert c.get(ROOT+'/targets/g/config',headers=h).json()['concurrency']==expected_default
- assert c.post(ROOT+'/targets/g/runs',json={**base,'concurrency':33},headers=h).status_code==422
+ assert c.post(ROOT+'/targets/g/runs',json={**base,'concurrency':0},headers=h).status_code==422
 
 
 def test_comparison_members_share_uploaded_cases_after_first_job_cleanup(setup, monkeypatch, tmp_path):
@@ -198,46 +198,32 @@ def test_comparison_members_share_uploaded_cases_after_first_job_cleanup(setup, 
  assert k.created==2
 
 
-def test_comparison_queues_jobs_and_waits_for_predecessor_pods(setup, monkeypatch):
+def test_comparison_starts_jobs_without_predecessors(setup, monkeypatch):
  from evaluation_backend.runs import WAIT_FOR
- from evaluation_backend.serial_runs import reconcile_serial_runs
  c,k,h,service,body=prepare(setup,monkeypatch)
  saved=c.post(ROOT+'/targets/g/configuration',json=body,headers=h).json()
  url=ROOT+'/targets/g/run-comparison'
- value=dict(config_revision=saved['revision'],levels=[8,1,4],
-            group_id='4bdd471a-a54c-460f-a946-d39d09897360',provider='f5',guardrail_id='g')
+ registry_url=ROOT+'/admin/guardrail-registry'
+ registry=c.get(registry_url,headers=h).json()
+ registry['registry']['providers'].append({
+  'id':'second-guard','name':'Second Guard','instances':[{'id':'other','address':'https://other.test/scans'}],
+ })
+ assert c.put(registry_url,json=registry,headers=h).status_code==200
+ endpoints=[{'provider':'f5','guardrail_id':'g'}, {'provider':'second-guard','guardrail_id':'other'}, {'provider':'f5','guardrail_id':'g'}]
+ value=dict(config_revision=saved['revision'],levels=[64,1,4],
+            group_id='4bdd471a-a54c-460f-a946-d39d09897360',endpoints=endpoints)
+ assert c.post(url,json={**value,'endpoints':[endpoints[0],endpoints[1],{**endpoints[2],'guardrail_id':'missing'}]},headers=h).status_code==422
+ assert k.created==0
  response=c.post(url,json=value,headers=h)
  assert response.status_code==200,response.text
  runs=response.json()['items']
- assert [r['serial_index'] for r in runs]==[0,1,2]
- assert all(r['phase']=='QUEUED' for r in runs)
+ assert [r['group_index'] for r in runs]==[0,1,2]
  jobs=[k.saved[r['id']] for r in runs]
  connections=[service.storage.get('run-contexts','p',r['experiment_id'])['guardrail_connection'] for r in runs]
- assert connections[0]==connections[1]==connections[2]
- assert c.post(url,json={**value,'levels':[1,8,4]},headers=h).status_code==409
+ assert [(connection['provider'],connection['id']) for connection in connections]==[('f5','g'),('second-guard','other'),('f5','g')]
+ assert c.post(url,json={**value,'endpoints':[endpoints[0],endpoints[0],endpoints[2]]},headers=h).status_code==409
+ assert c.post(url,json={**value,'levels':[1,64,4]},headers=h).status_code==409
  assert c.post(url,json=value,headers=h).status_code==200 and k.created==3
 
- call=k.call
- live_pods={}
- def runtime(method,path,**kwargs):
-  if method=='PATCH':
-   job=k.saved[path.rsplit('/',1)[-1]]
-   job['spec']['suspend']=False
-   del job['metadata']['annotations'][WAIT_FOR]
-   return {}
-  if path.endswith('/pods'):
-   return {'items':live_pods.get(kwargs['params']['labelSelector'],[])}
-  return call(method,path,**kwargs)
- monkeypatch.setattr(k,'call',runtime)
- reconcile_serial_runs(k)
- assert [j['spec']['suspend'] for j in jobs]==[False,True,True]
- jobs[0]['status']={'conditions':[{'type':'Complete','status':'True'}]}
- live_pods['job-name='+runs[0]['id']]=[{'status':{'phase':'Running'}}]
- reconcile_serial_runs(k)
- assert jobs[1]['spec']['suspend']
- live_pods.clear()
- reconcile_serial_runs(k)
- assert [j['spec']['suspend'] for j in jobs]==[False,False,True]
- jobs[1]['status']={'conditions':[{'type':'Failed','status':'True'}]}
- reconcile_serial_runs(k)
- assert not jobs[2]['spec']['suspend']
+ assert all(not job['spec'].get('suspend') for job in jobs)
+ assert all(WAIT_FOR not in job['metadata']['annotations'] for job in jobs)

@@ -11,7 +11,7 @@ from evaluation_backend.storage.service import get_service, now, public
 class RunnerConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
     id: str = Field(default='kubernetes', min_length=1, max_length=100)
-    concurrency: int = Field(default=1, ge=1, le=32, strict=True)
+    concurrency: int = Field(default=1, ge=1, strict=True)
 
 
 class EnvironmentConfig(BaseModel):

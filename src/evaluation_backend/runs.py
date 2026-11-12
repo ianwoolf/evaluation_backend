@@ -47,7 +47,7 @@ class DatasetSelection(BaseModel):
 
 class StartRun(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    concurrency: int | None = Field(default=None, ge=1, le=32, strict=True)
+    concurrency: int | None = Field(default=None, ge=1, strict=True)
     concurrency_group: str | None = Field(default=None, pattern=r'^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
     execution_mode: Literal['legacy', 'guardrail'] = 'legacy'
     guardrail_bindings: list[dict] | None = None
@@ -190,7 +190,7 @@ def persisted_run(context, service, project):
                  if key in selection} for selection in selections]
     primary = next((selection for selection in datasets if selection['dataset_id'] == dataset_id), {})
     environment = context['environment']
-    record = {key: context[key] for key in ('execution_mode', 'feature_modes', 'target_id', 'environment_id', 'concurrency', 'concurrency_group', 'serial_index',
+    record = {key: context[key] for key in ('execution_mode', 'feature_modes', 'target_id', 'environment_id', 'concurrency', 'concurrency_group', 'serial_index', 'group_index',
                                             'environment_version', 'dataset_version', 'scoring_mode', 'scorer_selection') if key in context}
     return {**record, 'id': context['job_name'], 'experiment_id': context['id'],
             'name': context['name'], 'created_at': context['created_at'], 'status': status, 'phase': status,
@@ -233,14 +233,13 @@ def start(request: StartRun, x_project_id: str = Header(min_length=1),
 
 
 @observed('evaluation.trigger', project_id='x_project_id')
-def start_run(request, x_project_id, idempotency_key, cluster, service, *, wait_for=None, serial_levels=None, connection=None):
+def start_run(request, x_project_id, idempotency_key, cluster, service, *, comparison_plan=None, group_index=None, connection=None):
     if request.datasets is not None and request.upload_id:
         raise HTTPException(422, 'Specify uploads per dataset')
     # Idempotency is checked before touching temporary content (which may already be deleted).
     request_data = request.model_dump()
-    if wait_for is not None:
-        request_data['wait_for'] = wait_for
-        request_data['serial_levels'] = serial_levels
+    if comparison_plan is not None:
+        request_data['comparison_plan'] = comparison_plan
     for field in ('concurrency', 'concurrency_group'):
         if request_data[field] is None:
             del request_data[field]
@@ -276,7 +275,8 @@ def start_run(request, x_project_id, idempotency_key, cluster, service, *, wait_
     if request.model_id != environment['modelId']:
         raise HTTPException(422, 'Model must match the stored environment version')
     concurrency = request.concurrency or environment.get('runner', {}).get('concurrency', 1)
-    if type(concurrency) is not int or not 1<=concurrency<=32:raise HTTPException(422,'Environment case concurrency must be 1..32')
+    if type(concurrency) is not int or concurrency < 1:
+        raise HTTPException(422, 'Environment case concurrency must be a positive integer')
     resources = PodResources(cpu_millicores=environment['cpuMillicores'], memory_mib=environment['memoryMiB'])
     if request.resources is not None and request.resources != resources:
         raise HTTPException(422, 'Resources must match the stored environment version')
@@ -374,8 +374,8 @@ def start_run(request, x_project_id, idempotency_key, cluster, service, *, wait_
     context['concurrency'] = concurrency
     if request.concurrency_group:
         context['concurrency_group'] = request.concurrency_group
-    if wait_for is not None:
-        context['serial_index'] = len(wait_for)
+    if group_index is not None:
+        context['group_index'] = group_index
     context['execution_mode'] = request.execution_mode
     context['guardrail_bindings'] = guardrail_bindings
     context['scoring_selections'] = dataset_records
@@ -403,8 +403,8 @@ def start_run(request, x_project_id, idempotency_key, cluster, service, *, wait_
     snapshot = context.get('report_snapshot', snapshot)
     record = {k: v for k,v in request.model_dump().items() if k not in ('snapshot', 'upload_id')}
     record['concurrency'] = concurrency
-    if wait_for is not None:
-        record['serial_index'] = len(wait_for)
+    if group_index is not None:
+        record['group_index'] = group_index
     record['feature_modes'] = context.get('feature_modes', feature_modes)
     record.update(name=context.get('name', request.name.strip() or generated_name), snapshot=snapshot, sample_count=count, resources=resources.model_dump())
     record['datasets'] = [{k: v for k, v in d.items() if k not in ('upload_id','scorer_metadata','scorer_bindings')} for d in dataset_records]
@@ -415,9 +415,6 @@ def start_run(request, x_project_id, idempotency_key, cluster, service, *, wait_
     job['metadata']['name'] = name
     job['metadata']['labels']['project'] = project_label(x_project_id)
     job['metadata']['annotations'] = {PREFIX + 'project': x_project_id, PREFIX + 'record': json.dumps(record), PREFIX + 'request-hash': digest}
-    if wait_for is not None:
-        job['spec']['suspend'] = True
-        job['metadata']['annotations'][WAIT_FOR] = json.dumps(wait_for)
     job['spec']['template']['spec']['containers'][0]['env'].extend([
         {'name':'EVAL_JUDGE_MODEL_IDS','value':json.dumps(sorted({c['execution']['model_id'] for b in bindings for c in b['scorer_metadata'].get('evaluation',{}).get('scorers',{}).values() if c.get('execution',{}).get('engine')=='llm_judge'}))},
         {'name':'EVAL_CONCURRENCY','value':str(concurrency)},

@@ -38,8 +38,8 @@ class Settings:
         if version.tzinfo is None:
             raise ValueError('DATASET_VERSION must include a timezone')
         concurrency = int(env.get('EVAL_CONCURRENCY', '1'))
-        if not 1 <= concurrency <= 32:
-            raise ValueError('EVAL_CONCURRENCY must be 1..32')
+        if concurrency < 1:
+            raise ValueError('EVAL_CONCURRENCY must be a positive integer')
         return cls(required('DATASET_ID'), evaluation_id.strip(), ids, version.astimezone(timezone.utc), env.get('EVAL_PLATFORM', 'storage'), concurrency)
 
 
