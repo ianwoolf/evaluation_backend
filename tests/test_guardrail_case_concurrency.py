@@ -48,9 +48,13 @@ def test_global_case_pool_has_bounded_parallelism_and_concurrent_writers(monkeyp
     assert peak==concurrency
     assert write_peak==concurrency
     assert len(client.samples)==len({s['id'] for s in client.samples})==12
-    assert summary['items']==12 and summary['errors']==1 and summary['status']=='FAILED'
+    assert summary['items']==12 and summary['errors']==1 and summary['status']=='COMPLETED'
     assert [d['items'] for d in summary['dataset_results']]==[6,6]
     assert [d['errors'] for d in summary['dataset_results']]==[0,1]
+    assert [d['status'] for d in summary['dataset_results']]==['COMPLETED','COMPLETED']
+    failed=[sample for sample in client.samples if sample['status']=='ERROR']
+    assert len(failed)==1 and failed[0]['guardrail_result']['http_status']==500
+    assert client.summaries[-1]==summary
     assert len(closed)==concurrency
 
 

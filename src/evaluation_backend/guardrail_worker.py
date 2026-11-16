@@ -153,13 +153,14 @@ def run(client=None):
                     progress['items']+=1;summary['items']+=1
                     if sample['status']=='ERROR':progress['errors']+=1;summary['errors']+=1
                     if progress['items']==progress['sample_count']:
-                        progress['status']='FAILED' if progress['errors'] else 'COMPLETED'
+                        progress['status']='COMPLETED'
                     # Samples persist individually; coalesce progress writes to avoid
                     # waiting for an extra ES refresh for every completed case.
                     if summary['items']%concurrency==0:
                         client.experiment(ident,summary)
                     event('guardrail.sample.completed',run_id=ident,sample_id=sample['id'],status=sample['status'])
-        summary['status']='FAILED' if summary['errors'] else 'COMPLETED'
+        # A case error is a persisted outcome. Runner or storage failures still raise.
+        summary['status']='COMPLETED'
         client.experiment(ident,summary)
         event('guardrail.pool.completed',run_id=ident,count=summary['items'],status=summary['status'])
         return summary
@@ -171,7 +172,7 @@ if __name__=='__main__':
     configure_logging('guardrail-worker')
     try:
         result=run();print(json.dumps({**result,'evaluation_id':os.environ['EXPERIMENT_ID']}))
-        code=1 if result['errors'] else 0
+        code=0
     except Exception as error:
         event('guardrail.worker.failed',level='ERROR',error=error);code=1
     finally:
