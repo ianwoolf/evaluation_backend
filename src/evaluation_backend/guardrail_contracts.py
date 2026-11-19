@@ -29,11 +29,18 @@ class GuardrailDatasetConfig(StrictContract):
 
 def validate_guardrail_rows(fields, rows, config):
     expected = {'input': 'input', 'label': 'reference', 'strategy': 'metadata'}
-    if {f.name: f.role for f in fields} != expected:
-        raise ValueError('Guardrail datasets require input, label, strategy with input/reference/metadata roles')
+    roles = {f.name: f.role for f in fields}
+    if any(roles.get(name) != role for name, role in expected.items()) or set(roles) - set(expected) - {'caseid'} or (roles.get('caseid') not in (None, 'metadata')) or any(f.name == 'caseid' and f.type != 'string' for f in fields):
+        raise ValueError('Guardrail datasets require input, label, strategy and optional caseid')
+    caseids = set()
     for row in rows:
-        if set(row) != set(expected):
-            raise ValueError('Guardrail rows require exactly input, label, strategy')
+        if set(row) - set(roles) or not set(expected).issubset(row):
+            raise ValueError('Guardrail rows require input, label, strategy and optional caseid')
+        caseid = row.get('caseid')
+        if caseid not in (None, ''):
+            if 'caseid' not in roles or not isinstance(caseid, str) or not caseid.strip() or len(caseid) > 128 or caseid in caseids:
+                raise ValueError('Guardrail caseid must be unique nonempty text (maximum 128 characters)')
+            caseids.add(caseid)
         value = row['input']
         if not ((isinstance(value, str) and value.strip()) or (isinstance(value, dict) and value)):
             raise ValueError('Guardrail input must be a nonempty string or object')
@@ -87,9 +94,12 @@ class GuardrailRequestResult(StrictContract):
     request_id: str = Field(min_length=1, max_length=128)
     binding_ids: list[str] = Field(min_length=1, max_length=100)
     row_id: str = Field(min_length=1, max_length=128)
+    caseid: str = Field(min_length=1, max_length=128)
     strategy: str
-    label: Label
     status: Literal['COMPLETED', 'ERROR']
+    state_type: Literal['ok', 'rate-limit', 'timeout', 'error']
+    guardrail_outcome: str | None = None
+    reason: str | None = Field(default=None, max_length=8000)
     guardrail_latency_ms: float = Field(ge=0, allow_inf_nan=False)
     scorer_latency_ms: float = Field(ge=0, allow_inf_nan=False)
     total_latency_ms: float = Field(ge=0, allow_inf_nan=False)
@@ -104,12 +114,10 @@ class GuardrailRequestResult(StrictContract):
     def consistent(self):
         if len(self.binding_ids) != len(set(self.binding_ids)):
             raise ValueError('Duplicate request binding')
-        if self.status == 'ERROR' and (not self.error_stage or not self.error_code or self.classifications):
-            raise ValueError('Failed requests require an error stage/code and no classification')
-        if self.status == 'COMPLETED' and (self.error_stage or self.error_code or not self.classifications):
+        if self.status == 'ERROR' and (not self.error_stage or not self.error_code or not self.reason or self.classifications or self.state_type == 'ok'):
+            raise ValueError('Failed requests require stage, code, reason, non-ok state and no classification')
+        if self.status == 'COMPLETED' and (self.error_stage or self.error_code or not self.classifications or self.state_type != 'ok'):
             raise ValueError('Completed requests require classifications and no error')
-        if any(c.expected != self.label for c in self.classifications):
-            raise ValueError('Classification expected label must match the dataset label')
         ids = [c.binding_id for c in self.classifications]
         if self.status == 'COMPLETED' and set(ids) != set(self.binding_ids):
             raise ValueError('Completed request must classify every binding')

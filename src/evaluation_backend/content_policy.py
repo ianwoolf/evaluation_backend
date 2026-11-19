@@ -32,6 +32,7 @@ class ContentPolicy(BaseModel):
             if result.get('guardrail_result'):
                 g = result['guardrail_result']
                 g['classifications'] = [{**c, 'reason': ''} for c in g.get('classifications', [])]
+                g['reason'] = '' if g.get('reason') else None
                 if self.reference == 'omit':
                     # Preserve aggregate classification evidence, not source label spelling.
                     g['strategy'] = ''

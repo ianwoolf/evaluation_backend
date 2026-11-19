@@ -42,6 +42,33 @@ def test_index_configuration(monkeypatch):
         ElasticsearchStorage('http://es.test', records_index='same', samples_index='same')
 
 
+def test_trace_search_returns_groups_then_only_selected_spans():
+    import json
+    calls=[]
+    def handle(request):
+        body=json.loads(request.content)
+        calls.append(body)
+        if 'aggs' in body:
+            return httpx.Response(200,json={'aggregations': {'groups': {'buckets': [
+                {'key': {'trace_id': 'trace-a'}, 'doc_count': 3,
+                 'example': {'hits': {'hits': [{'_source': {'sample_id': 'sample-a'}}]}}}],
+                 'after_key': {'trace_id': 'trace-a'}}}})
+        return httpx.Response(200,json={'hits': {'total': {'value': 1}, 'hits': [
+            {'_source': {'payload': {'id': 'run:trace-a:span-1', 'data': {'span': {'name': 'request'}}}},
+             '_seq_no': 1, '_primary_term': 1}]}})
+    storage=ElasticsearchStorage('http://es.test',client=httpx.Client(transport=httpx.MockTransport(handle)))
+    page=storage.trace_groups('project','run',search='sample-*',after='trace-before')
+    assert page == {'items': [{'trace_id':'trace-a','sample_id':'sample-a','span_count':3}], 'next_cursor':None}
+    query=calls[0]
+    assert query['size']==0
+    assert query['query']['bool']['filter'][:2]==[{'term':{'project_id':'project'}},{'term':{'evaluation_id':'run'}}]
+    assert query['aggs']['groups']['composite']['after']=={'trace_id':'trace-before'}
+    assert '\\*' in query['query']['bool']['filter'][2]['bool']['should'][0]['wildcard']['sample_id']['value']
+    selected=storage.trace_group('project','run','trace-a')
+    assert selected['items'][0]['data']['span']['name']=='request'
+    assert {'prefix': {'id': 'run:trace-a:'}} in calls[1]['query']['bool']['filter']
+
+
 def test_elasticsearch_conflicts_do_not_leak_upstream_body():
     storage = ElasticsearchStorage('http://es.test', client=httpx.Client(transport=httpx.MockTransport(
         lambda _: httpx.Response(409, json={'error': 'private vendor data'}))))
@@ -109,3 +136,96 @@ def test_scorer_specs_roundtrip_and_search_isolation():
     assert storage.decode('scorers',{'_source':doc,'_seq_no':1,'_primary_term':1})=={**spec,'_revision':'1:1'}
     storage.search('scorers','project-a')
     assert calls[-1]['query']['bool']['filter']==[{'term':{'project_id':'project-a'}},{'term':{'record_type':'scorer'}},{'term':{'state':'head'}}]
+
+
+def test_sample_page_filters_historical_source_and_pairs_binding_outcome():
+    import json
+    queries = []
+    def handle(request):
+        queries.append(json.loads(request.content))
+        return httpx.Response(200, json={'hits': {'hits': [], 'total': {'value': 213}}})
+    storage = ElasticsearchStorage('http://es.test', client=httpx.Client(transport=httpx.MockTransport(handle)))
+    result = storage.search('samples', 'p', filters={'evaluation_id':'run', 'dataset_id':'d',
+                            'binding_id':'b', 'outcome':'FN', 'strategy':'test'}, offset=100, limit=100)
+    query = queries[-1]
+    assert result['total'] == 213
+    assert query['from'] == 100 and query['size'] == 100
+    assert {'term': {'project_id':'p'}} in query['query']['bool']['filter']
+    assert {'term': {'run_id':'run'}} in query['query']['bool']['filter']
+    assert {'term': {'sample_dataset_id':'d'}} in query['query']['bool']['filter']
+    assert query['runtime_mappings']['sample_outcome']['script']['params'] == {'binding':'b'}
+    storage.search('samples', 'p', filters={'evaluation_id':'run', 'binding_id':'b', 'outcome':'ERROR'})
+    query = queries[-1]
+    assert {'term': {'status':'ERROR'}} in query['query']['bool']['filter']
+    assert 'sample_binding_id' in query['runtime_mappings']
+    assert 'sample_outcome' not in query['runtime_mappings']
+
+
+def test_sample_page_loads_all_traces_in_one_batch():
+    import json
+    paths = []
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith('_search'):
+            hits = [{'_source': {'project_id':'p', 'sample_id':str(i), 'trace_id':'t'+str(i)},
+                     '_seq_no':1, '_primary_term':1} for i in range(3)]
+            return httpx.Response(200, json={'hits':{'hits':hits,'total':{'value':3}}})
+        ids = json.loads(request.content)['ids']
+        return httpx.Response(200, json={'docs':[
+            {'_id':ident,'found':True,'_source':{'project_id':'p','payload':{'data':{'trace':[{'name':'Target'}]}}}}
+            for ident in ids]})
+    storage = ElasticsearchStorage('http://es.test', client=httpx.Client(transport=httpx.MockTransport(handle)))
+    page = storage.search('samples', 'p')
+    assert len(paths) == 2 and paths[1].endswith('/_mget')
+    assert all(sample['trace'] == [{'name':'Target'}] for sample in page['items'])
+
+
+def test_column_multiselect_combines_or_with_cross_column_and():
+    import json
+    queries = []
+    def handle(request):
+        queries.append(json.loads(request.content))
+        return httpx.Response(200, json={'hits': {'hits': [], 'total': {'value': 0}}})
+    storage = ElasticsearchStorage('http://es.test', client=httpx.Client(transport=httpx.MockTransport(handle)))
+    storage.search('samples', 'p', filters={'evaluation_id':'run', 'columns':{
+        'outcome':['TP','TN'], 'status':['PASS'], 'input':['HeLLo'], 'response':['cleared']}})
+    query = queries[-1]
+    terms = query['query']['bool']['filter']
+    assert {'terms':{'column_outcome':['TP','TN']}} in terms
+    assert {'terms':{'column_status':['PASS']}} in terms
+    assert {'term':{'column_input':True}} in terms
+    assert query['runtime_mappings']['column_input']['script']['params'] == {'field':'input','text':'hello'}
+    assert query['runtime_mappings']['column_response']['script']['params']['field'] == 'output'
+
+
+def test_filter_options_are_project_and_run_scoped_and_support_paging():
+    import json
+    calls=[]
+    def handle(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200,json={'aggregations':{'options':{
+            'buckets':[{'key':{'value':'200'}}]}}})
+    storage = ElasticsearchStorage('http://es.test', client=httpx.Client(transport=httpx.MockTransport(handle)))
+    result=storage.sample_filter_options('p','run','http_status',dataset_id='d',search='2',after='199')
+    query=calls[-1]
+    assert query['size']==0
+    assert {'term':{'project_id':'p'}} in query['query']['bool']['filter']
+    assert {'term':{'run_id':'run'}} in query['query']['bool']['filter']
+    assert query['aggs']['options']['composite']['after']=={'value':'199'}
+    assert result=={'items':['200'],'next_cursor':None}
+
+
+@pytest.mark.parametrize('column',['duration','guardrail_latency','scores'])
+@pytest.mark.parametrize('order',['asc','desc'])
+def test_sample_numeric_sort_is_global_stable_and_places_missing_last(column,order):
+    import json
+    queries=[]
+    def handle(request):
+        queries.append(json.loads(request.content))
+        return httpx.Response(200,json={'hits':{'hits':[],'total':{'value':1000}}})
+    storage=ElasticsearchStorage('http://es.test',client=httpx.Client(transport=httpx.MockTransport(handle)))
+    storage.search('samples','p',filters={'evaluation_id':'run','sort':(column,order)},offset=100,limit=100)
+    query=queries[-1]
+    assert query['sort']==[{'sample_sort':{'order':order,'missing':'_last'}},{'id':'asc'}]
+    assert query['runtime_mappings']['sample_sort']['type']=='double'
+    assert query['from']==100 and query['size']==100

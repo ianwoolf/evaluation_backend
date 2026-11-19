@@ -7,9 +7,25 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 def test_disabled_without_collector(monkeypatch):
     monkeypatch.delenv('OTEL_EXPORTER_OTLP_ENDPOINT',raising=False)
     monkeypatch.delenv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',raising=False)
+    monkeypatch.delenv('EVAL_COLLECTOR_URL',raising=False)
     monkeypatch.setattr(tracing,'_provider',None)
     tracing.configure()
     with tracing.span('test') as span:assert not span.is_recording()
+
+
+def test_runner_local_collector_enables_tracing_without_optional_configmap(monkeypatch):
+    monkeypatch.delenv('OTEL_EXPORTER_OTLP_ENDPOINT',raising=False)
+    monkeypatch.delenv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',raising=False)
+    monkeypatch.setenv('EVAL_COLLECTOR_URL','http://127.0.0.1:18091')
+    monkeypatch.delenv('OTEL_SDK_DISABLED',raising=False)
+    monkeypatch.delenv('OTEL_TRACES_EXPORTER',raising=False)
+    monkeypatch.setattr(tracing,'_provider',None)
+    tracing.configure()
+    try:
+        assert tracing._provider is not None
+        with tracing.span('test') as span:assert span.is_recording()
+    finally:
+        tracing.shutdown()
 
 def test_parent_error_and_content_policy(monkeypatch):
     exporter=InMemorySpanExporter();provider=TracerProvider();provider.add_span_processor(SimpleSpanProcessor(exporter))

@@ -29,6 +29,7 @@ class TraceDocument(BaseModel):
 class SampleDocument(BaseModel):
     guardrail_result: GuardrailRequestResult | None = None
     id: str = Field(min_length=1, max_length=128)
+    caseid: str | None = Field(default=None, min_length=1, max_length=128)
     dataset_id: str | None = Field(default=None, min_length=1, max_length=128)
     dataset_version: int | None = Field(default=None, ge=1)
     input: dict[str, Any]
@@ -119,6 +120,19 @@ def traces(evaluation_id: str, x_project_id: str = Header(min_length=1), offset:
     return service.page('traces', x_project_id, filters={'evaluation_id': evaluation_id}, offset=offset, limit=limit)
 
 
+@router.get('/traces/groups')
+def trace_groups(evaluation_id: str, x_project_id: str = Header(min_length=1),
+                 search: str = Query('', max_length=120), after: str | None = Query(None, max_length=128),
+                 service=Depends(get_service)):
+    return service.storage.trace_groups(x_project_id, evaluation_id, search=search.strip(), after=after)
+
+
+@router.get('/traces/group')
+def trace_group(evaluation_id: str, trace_id: str = Query(min_length=1, max_length=128),
+                x_project_id: str = Header(min_length=1), service=Depends(get_service)):
+    return service.storage.trace_group(x_project_id, evaluation_id, trace_id)
+
+
 @router.get('/scores')
 def scores(evaluation_id: str, x_project_id: str = Header(min_length=1), offset: int = Query(0, ge=0, le=9900),
            limit: int = Query(100, ge=1, le=100), service=Depends(get_service)):
@@ -145,8 +159,47 @@ def save_sample(ident: str, value: SampleDocument, x_project_id: str = Header(mi
 
 @router.get('/experiments/{ident}/samples')
 def samples(ident: str, x_project_id: str = Header(min_length=1), offset: int = Query(0, ge=0, le=9900),
-            limit: int = Query(100, ge=1, le=100), service=Depends(get_service)):
-    return service.page('samples', x_project_id, filters={'evaluation_id': ident}, offset=offset, limit=limit)
+            limit: int = Query(100, ge=1, le=100), dataset_id: str | None = None,
+            binding_id: str | None = None, strategy: str | None = None,
+            outcome: Literal['TP', 'FP', 'TN', 'FN', 'ERROR'] | None = None,
+            columns: str | None = Query(None, max_length=30000),
+            sort_by: Literal['scores', 'duration', 'guardrail_latency'] | None = None,
+            sort_order: Literal['asc', 'desc'] = 'asc', service=Depends(get_service)):
+    filters = {'evaluation_id': ident}
+    for name, value in (('dataset_id', dataset_id), ('binding_id', binding_id),
+                        ('strategy', strategy), ('outcome', outcome)):
+        if value is not None:
+            filters[name] = value
+    if columns:
+        from .sample_filters import COLUMNS
+        try:
+            parsed = json.loads(columns)
+            if not isinstance(parsed, dict) or len(parsed) > 11:
+                raise ValueError()
+            for column, values in parsed.items():
+                if column not in {*COLUMNS, 'input', 'response'} or not isinstance(values, list) or not 1 <= len(values) <= 100:
+                    raise ValueError()
+                if any(not isinstance(value, str) or len(value) > 4000 for value in values):
+                    raise ValueError()
+                if column in ('input', 'response') and len(values) != 1:
+                    raise ValueError()
+            filters['columns'] = parsed
+        except (ValueError, TypeError):
+            raise HTTPException(422, 'Invalid sample column filters') from None
+    if sort_by:
+        filters['sort'] = (sort_by, sort_order)
+    return service.page('samples', x_project_id, filters=filters, offset=offset, limit=limit)
+
+
+@router.get('/experiments/{ident}/samples/filter-options')
+def sample_filter_options(ident: str, column: str, x_project_id: str = Header(min_length=1),
+                          dataset_id: str | None = None, search: str = Query('', max_length=200),
+                          after: str | None = Query(None, max_length=4000), service=Depends(get_service)):
+    from .sample_filters import COLUMNS
+    if column not in COLUMNS:
+        raise HTTPException(422, 'Unsupported sample filter column')
+    return service.storage.sample_filter_options(x_project_id, ident, column,
+                                                dataset_id=dataset_id, search=search, after=after)
 
 
 @router.post('/experiments/{ident}')

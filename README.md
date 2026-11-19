@@ -202,6 +202,15 @@ ConfigMap 修改后需要重启 API，已启动的 runner 不会自动更新环�
 不要将日志 endpoint 指向它。未配置日志接收端时不需要新增日志索引，也不会把运行日志
 混入三个评测业务索引。SDK 接入方式参考 [OpenTelemetry Python 日志文档](https://opentelemetry.io/docs/languages/python/instrumentation/#logs)。
 
+Traces 页读取 `evaluation-traces-v1` 中的 OTLP spans。新版本 runner 由
+`evaluation_backend.proxy_entrypoint` 启动同 Pod collector，并默认把 spans 发送到
+`http://127.0.0.1:18091/v1/traces`；`evaluation-observability` ConfigMap 可选。
+显式设置 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` 时优先使用该地址，同时保留本地
+collector 的写入。若 Traces 页为空，先确认 Job 使用新 worker 镜像、入口仍为
+`proxy_entrypoint`，再检查 `OTEL_SDK_DISABLED` / `OTEL_TRACES_EXPORTER` 未禁用追踪，
+collector 能连接配置的 `EVAL_ES_URL` 且 `EVAL_ES_TRACES_INDEX` 与 API 一致。
+旧版本在缺少 traces endpoint 时不会生成 spans；历史空数据无法补录。
+
 ```bash
 kubectl -n evaluation logs deployment/evaluation-api
 kubectl -n evaluation logs job/<evaluation-job-name>

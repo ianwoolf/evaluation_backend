@@ -24,6 +24,28 @@ def test_guardrail_roundtrip_and_strict_mapping():
         with pytest.raises(ValidationError):DatasetContent.model_validate(value)
 
 
+def test_guardrail_caseid_is_optional_and_unique_when_supplied():
+    value=content()
+    value['fields'].append(dict(name='caseid',role='metadata',type='string',required=False))
+    value['rows']=[dict(input='one',label=0,strategy='benign',caseid='case-one'),
+                   dict(input='two',label=1,strategy='unsafe')]
+    assert DatasetContent.model_validate(value).rows[0]['caseid']=='case-one'
+    value['rows'][1]['caseid']='case-one'
+    with pytest.raises(ValidationError):DatasetContent.model_validate(value)
+
+
+def test_uploaded_guardrail_caseids_are_unique_across_rows():
+    from evaluation_backend.guardrail_runs import validate_uploaded_rows
+    from evaluation_backend.uploads import UploadError
+    value=content()
+    value['fields'].append(dict(name='caseid',role='metadata',type='string',required=False))
+    value['rows']=[dict(input='one',label=0,strategy='benign',caseid='same'),
+                   dict(input='two',label=1,strategy='unsafe',caseid='same')]
+    config=value['guardrail']
+    with pytest.raises(UploadError,match='Sample 2: duplicate caseid'):
+        validate_uploaded_rows(value,{**config,'label_mapping':config['label_mapping']})
+
+
 @pytest.mark.parametrize('change', ['missing-column','extra-column','wrong-role','empty-input','scorer-mismatch'])
 def test_invalid_guardrail_dataset(change):
     value=content()
@@ -50,11 +72,12 @@ def test_quadrant_semantics(expected,predicted,outcome):
     with pytest.raises(ValidationError):ClassificationResult(**{**result.model_dump(),'outcome':'FN' if outcome!='FN' else 'TP'})
 
 
-def test_errors_never_classified_and_label_must_match():
-    args=dict(request_id='r',binding_ids=['b'],row_id='row-1',strategy='s',label='unsafe',status='ERROR',guardrail_latency_ms=10,scorer_latency_ms=0,total_latency_ms=10,error_stage='target',error_code='timeout')
+def test_errors_never_classified_and_reason_required():
+    args=dict(request_id='r',binding_ids=['b'],row_id='row-1',caseid='case-1',strategy='s',status='ERROR',state_type='timeout',reason='Timed out',guardrail_latency_ms=10,scorer_latency_ms=0,total_latency_ms=10,error_stage='target',error_code='timeout')
     assert GuardrailRequestResult(**args).classifications==[]
     c=dict(binding_id='b',expected='safe',predicted='safe',outcome='TN',reason='check')
     with pytest.raises(ValidationError):GuardrailRequestResult(**{**args,'classifications':[c]})
+    with pytest.raises(ValidationError):GuardrailRequestResult(**{**args,'reason':None})
     with pytest.raises(ValidationError):GuardrailRequestResult(**{**args,'status':'COMPLETED','error_stage':None,'error_code':None,'classifications':[c]})
 
 

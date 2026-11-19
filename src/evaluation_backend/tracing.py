@@ -12,7 +12,8 @@ _provider=None
 
 def configure():
     global _provider
-    endpoint=os.getenv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT') or os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT')
+    local=os.getenv('EVAL_COLLECTOR_URL','').rstrip('/')+'/v1/traces'
+    endpoint=os.getenv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT') or os.getenv('OTEL_EXPORTER_OTLP_ENDPOINT') or (local if os.getenv('EVAL_COLLECTOR_URL') else '')
     if _provider or not endpoint or os.getenv('OTEL_SDK_DISABLED','').lower()=='true' or os.getenv('OTEL_TRACES_EXPORTER','otlp')=='none': return
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -20,11 +21,10 @@ def configure():
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     protocol=os.getenv('OTEL_EXPORTER_OTLP_TRACES_PROTOCOL',os.getenv('OTEL_EXPORTER_OTLP_PROTOCOL','http/protobuf'))
     if protocol!='http/protobuf': raise ValueError('Tracing supports OTLP HTTP/protobuf')
-    target=endpoint if os.getenv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT') else endpoint.rstrip('/')+'/v1/traces'
+    target=endpoint if os.getenv('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT') or endpoint==local else endpoint.rstrip('/')+'/v1/traces'
     from urllib.parse import urlsplit
     url=urlsplit(target)
     if url.scheme not in ('http','https') or not url.netloc or url.username or url.password: raise ValueError('Invalid trace collector endpoint')
-    local=os.getenv('EVAL_COLLECTOR_URL','').rstrip('/')+'/v1/traces'
     provider=TracerProvider(resource=Resource.create({'service.name':'evaluation-runner','evaluation.id':os.getenv('EXPERIMENT_ID',''),'project.id':os.getenv('EVAL_PROJECT_ID','')}))
     headers={'Authorization':'Bearer '+os.getenv('EVAL_STORAGE_TOKEN','')}
     destinations=[target]

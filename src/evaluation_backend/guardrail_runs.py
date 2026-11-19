@@ -14,11 +14,17 @@ def validate_uploaded_rows(content, binding):
     from evaluation_backend.uploads import UploadError
     config = GuardrailDatasetConfig.model_validate({k: binding[k] for k in GuardrailDatasetConfig.model_fields})
     fields = [DatasetField.model_validate(field) for field in content['fields']]
+    caseids = set()
     for index, row in enumerate(content['rows'], 1):
         try:
             validate_guardrail_rows(fields, [row], config)
         except ValueError as error:
             raise UploadError(f'Sample {index}: {error}') from None
+        caseid = row.get('caseid')
+        if caseid not in (None, ''):
+            if caseid in caseids:
+                raise UploadError(f'Sample {index}: duplicate caseid {caseid}')
+            caseids.add(caseid)
 
 
 def resolve_bindings(service, project, target, environment, selections, versions, configured=None, validate_connection=True):

@@ -208,6 +208,40 @@ class ElasticsearchStorage:
             'size': limit, 'track_total_hits': True, 'seq_no_primary_term': True})
         return {'items': [self.unpack(h) for h in result['hits']['hits']], 'total': result['hits']['total']['value']}
 
+    def trace_groups(self, project, evaluation_id, *, search='', after=None):
+        terms = [{'term': {'project_id': project}}, {'term': {'evaluation_id': evaluation_id}}]
+        if search:
+            escaped = search.replace('\\', '\\\\').replace('*', '\\*').replace('?', '\\?')
+            terms.append({'bool': {'should': [
+                {'wildcard': {'sample_id': {'value': '*' + escaped + '*', 'case_insensitive': True}}},
+                {'wildcard': {'id': {'value': '*:' + escaped + '*', 'case_insensitive': True}}},
+            ], 'minimum_should_match': 1}})
+        composite = {'size': 20, 'sources': [{'trace_id': {'terms': {'field': 'trace_group'}}}]}
+        if after:
+            composite['after'] = {'trace_id': after}
+        result = self.call('POST', '/' + self.index('traces') + '/_search', json={
+            'size': 0, 'query': {'bool': {'filter': terms}},
+            'runtime_mappings': {'trace_group': {'type': 'keyword', 'script': {'source':
+                "def id=params._source.id; if (id != null) { int first=id.indexOf(':'); int last=id.lastIndexOf(':'); if (first>=0 && last>first) emit(id.substring(first+1,last)); }"}}},
+            'aggs': {'groups': {'composite': composite, 'aggs': {'example': {'top_hits': {
+                'size': 1, '_source': ['sample_id'], 'sort': [{'sample_id': {'order': 'asc', 'missing': '_last'}}, {'id': 'asc'}]}}}}},
+        })
+        buckets = result['aggregations']['groups']['buckets']
+        return {'items': [{'trace_id': bucket['key']['trace_id'],
+                           'sample_id': bucket['example']['hits']['hits'][0]['_source'].get('sample_id'),
+                           'span_count': bucket['doc_count']} for bucket in buckets],
+                'next_cursor': result['aggregations']['groups'].get('after_key', {}).get('trace_id') if len(buckets) == 20 else None}
+
+    def trace_group(self, project, evaluation_id, trace_id):
+        terms = [{'term': {'project_id': project}}, {'term': {'evaluation_id': evaluation_id}},
+                 {'prefix': {'id': evaluation_id + ':' + trace_id + ':'}}]
+        result = self.call('POST', '/' + self.index('traces') + '/_search', json={
+            'query': {'bool': {'filter': terms}}, 'sort': [{'id': 'asc'}],
+            'size': 1000, 'track_total_hits': True, 'seq_no_primary_term': True})
+        if result['hits']['total']['value'] > 1000:
+            raise StorageError('Trace has too many spans')
+        return {'items': [self.unpack(hit) for hit in result['hits']['hits']]}
+
     def record_key(self, collection, project, ident):
         kind = 'run' if collection in ('experiments', 'run-contexts') else collection
         return self.key(project, [kind, ident])
@@ -222,7 +256,7 @@ class ElasticsearchStorage:
             raise Conflict('Invalid revision') from None
         return {'if_seq_no': seq, 'if_primary_term': term}
 
-    def decode(self, collection, hit):
+    def decode(self, collection, hit, *, include_trace=True):
         doc = dict(hit['_source'])
         rev = f"{hit['_seq_no']}:{hit['_primary_term']}"
         if collection in ('targets', 'scorers', 'archives'):
@@ -260,7 +294,7 @@ class ElasticsearchStorage:
             doc['scores'] = [decode_score(s) for s in doc.get('scores', [])]
             trace_id = doc.pop('trace_id', None)
             doc['trace'] = []
-            if trace_id:
+            if trace_id and include_trace:
                 try:
                     trace = self.get('traces', hit['_source']['project_id'], trace_id)
                     doc['trace'] = trace['data'].get('trace', [])
@@ -376,17 +410,92 @@ class ElasticsearchStorage:
                 terms.append({'term': {'context_ready': True}})
         elif collection != 'samples':
             raise ValueError('Use sample scores instead of a scores collection')
-        for name, value in (filters or {}).items():
-            if name not in {'evaluation_id', 'sample_id', 'dataset_id', 'status'}:
+        runtime = {}
+        sample_filters = dict(filters or {})
+        sort = sample_filters.pop('sort', None)
+        columns = sample_filters.pop('columns', {})
+        if columns:
+            from .sample_filters import apply_columns
+            apply_columns(columns, runtime, terms)
+        # Runtime keywords read historical _source too, without reindexing reports.
+        if collection == 'samples':
+            scripts = {
+                'dataset_id': "if (params._source.dataset_id != null) emit(params._source.dataset_id);",
+                'strategy': "def g=params._source.guardrail_result; if (g != null && g.strategy != null) emit(g.strategy);",
+                'binding_id': "def g=params._source.guardrail_result; if (g != null && g.binding_ids != null) for (def b:g.binding_ids) emit(b);",
+                'outcome': "def g=params._source.guardrail_result; if (g != null && g.classifications != null) for (def c:g.classifications) emit(c.outcome);",
+            }
+            if sample_filters.get('outcome') == 'ERROR':
+                sample_filters.pop('outcome')
+                sample_filters['status'] = 'ERROR'
+            elif sample_filters.get('binding_id') and sample_filters.get('outcome'):
+                # Match the outcome of the selected evaluator binding in the same classification.
+                binding = sample_filters.pop('binding_id')
+                runtime['sample_outcome'] = {'type': 'keyword', 'script': {
+                    'source': "def g=params._source.guardrail_result; if (g != null && g.classifications != null) for (def c:g.classifications) if (c.binding_id == params.binding) emit(c.outcome);",
+                    'params': {'binding': binding},
+                }}
+            for name in scripts:
+                if name in sample_filters and 'sample_' + name not in runtime:
+                    runtime['sample_' + name] = {'type': 'keyword', 'script': {'source': scripts[name]}}
+        for name, value in sample_filters.items():
+            if name not in {'evaluation_id', 'sample_id', 'dataset_id', 'status'} and not (
+                    collection == 'samples' and name in {'binding_id', 'strategy', 'outcome'}):
                 raise ValueError('Unsupported search filter')
-            terms.append({'term': {'run_id' if name == 'evaluation_id' else name: value}})
+            field = 'run_id' if name == 'evaluation_id' else 'sample_' + name if 'sample_' + name in runtime else name
+            terms.append({'term': {field: value}})
         query = {'query': {'bool': {'filter': terms}}, 'sort': [{'id': 'asc'}], 'from': offset,
                  'size': limit, 'track_total_hits': True, 'seq_no_primary_term': True}
+        if sort and collection == 'samples':
+            from .sample_filters import apply_sort
+            query['sort'] = apply_sort(sort, runtime)
+        if runtime:
+            query['runtime_mappings'] = runtime
         if collection == 'samples' and not include_evidence:
             query['_source'] = ['sample_id', 'dataset_id', 'status', 'latency_ms', 'scores', 'guardrail_result']
         result = self.call('POST', f'/{self.index(collection)}/_search', json=query)
-        return {'items': [self.decode(collection, h) for h in result['hits']['hits']],
-                'total': result['hits']['total']['value']}
+        hits = result['hits']['hits']
+        items = [self.decode(collection, hit, include_trace=False) for hit in hits]
+        trace_ids = list(dict.fromkeys(hit['_source']['trace_id'] for hit in hits if hit['_source'].get('trace_id')))
+        if collection == 'samples' and include_evidence and trace_ids:
+            # Fetch this page's traces together, preserving the existing sample response.
+            traces = self.call('POST', '/' + self.index('traces') + '/_mget',
+                               json={'ids': [self.key(project, ident) for ident in trace_ids]})
+            by_id = {}
+            for doc in traces['docs']:
+                if doc.get('error'):
+                    raise StorageError('Sample trace retrieval failed')
+                if doc.get('found') and doc['_source']['project_id'] == project:
+                    by_id[doc['_id']] = doc['_source']['payload'].get('data', {}).get('trace', [])
+            for item, hit in zip(items, hits):
+                trace_id = hit['_source'].get('trace_id')
+                if trace_id:
+                    item['trace'] = by_id.get(self.key(project, trace_id), [])
+        return {'items': items, 'total': result['hits']['total']['value']}
+
+    def sample_filter_options(self, project, evaluation_id, column, *, dataset_id=None, search='', after=None):
+        from .sample_filters import keyword
+        field = 'option_value'
+        runtime = {field: keyword(column)}
+        terms = [{'term': {'project_id': project}}, {'term': {'run_id': evaluation_id}}]
+        if dataset_id:
+            runtime['option_dataset'] = keyword('dataset_id')
+            terms.append({'term': {'option_dataset': dataset_id}})
+        if search:
+            # Escape wildcard syntax so the menu search is a literal substring.
+            escaped = search.replace('\\', '\\\\').replace('*', '\\*').replace('?', '\\?')
+            terms.append({'wildcard': {field: {'value': '*' + escaped + '*', 'case_insensitive': True}}})
+        composite = {'size': 200, 'sources': [{'value': {'terms': {'field': field}}}]}
+        if after is not None:
+            composite['after'] = {'value': after}
+        result = self.call('POST', '/' + self.index('samples') + '/_search', json={
+            'size': 0, 'query': {'bool': {'filter': terms}}, 'runtime_mappings': runtime,
+            'aggs': {'options': {'composite': composite}},
+        })
+        options = result['aggregations']['options']
+        buckets = options['buckets']
+        return {'items': [bucket['key']['value'] for bucket in buckets],
+                'next_cursor': options.get('after_key', {}).get('value') if len(buckets) == 200 else None}
 
 
 SAMPLE_FIELDS = {'latencyMs': 'latency_ms', 'modelLatencyMs': 'model_latency_ms', 'costUsd': 'cost_usd'}
