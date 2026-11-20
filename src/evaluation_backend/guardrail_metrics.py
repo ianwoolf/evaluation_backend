@@ -68,7 +68,12 @@ def aggregate_results(requests, bindings):
         seen.add(r['request_id']);selected.append(r)
     counts={k:0 for k in ('TP','FP','TN','FN')}
     times=[];errors=0
+    states={'ok':0,'rate-limit':0,'timeout':0,'error':0}
+    states_available=True
     for r in selected:
+        state=r.get('state_type')
+        if state in states:states[state]+=1
+        else:states_available=False
         values=[c for c in r.get('classifications',[]) if c['binding_id'] in ids]
         if r['status']=='ERROR' or not values:errors+=1
         else:
@@ -77,7 +82,12 @@ def aggregate_results(requests, bindings):
     tp,fp,tn,fn=[counts[k] for k in ('TP','FP','TN','FN')]
     def ratio(a,b):return a/b if b else None
     valid=tp+fp+tn+fn
+    sample_count=sum(b.get('sample_count',0) for b in bindings)
+    state_counts=states if states_available and len(selected)==sample_count and sample_count>0 else None
     return {**counts,'precision':ratio(tp,tp+fp),'recall':ratio(tp,tp+fn),'accuracy':ratio(tp+tn,valid),'f1':ratio(2*tp,2*tp+fp+fn),
-            'processed':len(selected),'errors':errors,'valid_count':valid,'sample_count':sum(b.get('sample_count',0) for b in bindings),
-            'pending':max(0,sum(b.get('sample_count',0) for b in bindings)-len(selected)),
+            'fpr':ratio(fp,tn+fp),'fnr':ratio(fn,tp+fn),
+            'state_counts':state_counts,
+            'error_rate':ratio(states['rate-limit']+states['timeout']+states['error'],sample_count) if state_counts is not None else None,
+            'processed':len(selected),'errors':errors,'valid_count':valid,'sample_count':sample_count,
+            'pending':max(0,sample_count-len(selected)),
             'latency':latency_summary(times)}

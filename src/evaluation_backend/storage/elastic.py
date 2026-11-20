@@ -452,7 +452,7 @@ class ElasticsearchStorage:
         if runtime:
             query['runtime_mappings'] = runtime
         if collection == 'samples' and not include_evidence:
-            query['_source'] = ['sample_id', 'dataset_id', 'status', 'latency_ms', 'scores', 'guardrail_result']
+            query['_source'] = ['sample_id', 'dataset_id', 'status', 'latency_ms', 'scores', 'guardrail_result', 'reference.label']
         result = self.call('POST', f'/{self.index(collection)}/_search', json=query)
         hits = result['hits']['hits']
         items = [self.decode(collection, hit, include_trace=False) for hit in hits]

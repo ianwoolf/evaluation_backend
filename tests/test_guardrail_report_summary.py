@@ -19,6 +19,39 @@ def test_micro_average_and_latency_include_failures_not_duplicates():
  empty=aggregate_results([],bindings)
  assert empty['f1'] is None and empty['accuracy'] is None and empty['latency']['average_ms'] is None
 
+
+def test_dataset_error_rate_uses_complete_state_types_and_old_reports_stay_unknown():
+ bindings=[dict(binding_id='a',dataset_id='a',dataset_version=1,sample_count=4)]
+ requests=[{**req('ok','a','TN'), 'state_type':'ok'},
+           {**req('limited','a',error=True), 'state_type':'rate-limit', 'http_status':429},
+           {**req('timeout','a',error=True), 'state_type':'timeout'},
+           {**req('server','a',error=True), 'state_type':'error', 'http_status':500}]
+ result=aggregate_results(requests,bindings)
+ assert result['state_counts']=={'ok':1,'rate-limit':1,'timeout':1,'error':1}
+ assert result['error_rate']==.75
+ assert result['fpr']==0 and result['fnr'] is None
+ assert aggregate_results(requests[:-1],bindings)['error_rate'] is None
+ assert aggregate_results([*requests[:-1],req('legacy','a',error=True)],bindings)['error_rate'] is None
+
+
+def test_dataset_label_distribution_and_fpr_fnr_from_run_owned_samples():
+ binding=dict(binding_id='a',dataset_id='a',dataset_version=1,sample_count=4,
+              label_mapping={'1':'unsafe','0':'safe'})
+ records=[('1','TP','ok'),('0','TN','ok'),('0','FP','ok'),('1',None,'rate-limit')]
+ samples=[{'reference':{'label':label},'guardrail_result':{
+     **req(str(index),'a',outcome,error=outcome is None),'state_type':state}}
+     for index,(label,outcome,state) in enumerate(records)]
+ context={'guardrail_bindings':[binding],'datasets':[{'dataset_id':'a','name':'A'}]}
+ result=guardrail_report(context,samples)['dataset_results'][0]
+ assert result['label_distribution']=={'positive':2,'negative':2,'total':4}
+ assert result['error_rate']==.25
+ assert result['fpr']==.5 and result['fnr']==0
+ samples[0]['reference']={}
+ samples[1]['guardrail_result'].pop('state_type')
+ legacy=guardrail_report(context,samples)['dataset_results'][0]
+ assert legacy['label_distribution'] is None and legacy['error_rate'] is None
+ assert legacy['fpr']==.5 and legacy['fnr']==0
+
 def test_report_identity_is_run_owned_and_dataset_results_are_independent():
  service=EvaluationStorageService(Memory())
  bindings=[dict(binding_id=i,dataset_id=i,dataset_version=1,sample_count=1,aspect_name='Safety') for i in ('a','b')]
